@@ -175,9 +175,24 @@ const senderHtml = `<!DOCTYPE html>
 <div class="card">
   <h2>Send to this PC</h2>
   <p class="sub">Saves to D:\\art &bull; smart folder skip</p>
-  <div class="source-row" style="margin-bottom:.5rem;display:flex;gap:.5rem;align-items:center">
-    <span style="font-size:.85rem;color:#8ab4f8;flex:0 0 auto">Save inside:</span>
-    <input type="text" id="saveInsideInput" placeholder="e.g. subfolder (optional, leave blank for root)" style="flex:1;background:#1a3a5c;color:#fff;border:1px solid #1a3a5c;border-radius:6px;padding:.5rem;font-size:.85rem">
+  <!-- Destination row -->
+  <div style="margin-bottom:.5rem;display:flex;gap:.5rem;align-items:center;background:#0a1628;border:1px solid #1a3a5c;border-radius:8px;padding:.5rem .7rem">
+    <span style="font-size:.85rem;color:#8ab4f8;flex:0 0 auto">📥 Save to:</span>
+    <span id="destLabel" style="flex:1;font-size:.85rem;color:#ccc;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">D:\art (root)</span>
+    <button id="destBrowseBtn" style="background:#1a3a5c;color:#8ab4f8;border:none;padding:.35rem .75rem;border-radius:6px;font-size:.8rem;cursor:pointer;font-weight:600;white-space:nowrap">📁 Change</button>
+  </div>
+  <!-- Destination browser panel (server-side folder tree) -->
+  <div class="fb-panel" id="destBrowser">
+    <div style="padding:.5rem .6rem;background:#0d1f3c;border-bottom:1px solid #1a3a5c;font-size:.85rem;color:#4fc3f7;font-weight:600;display:flex;justify-content:space-between;align-items:center">
+      <span>📥 Pick Save Destination</span>
+      <span style="font-size:.75rem;color:#888;font-weight:normal">tap folder to go deeper</span>
+    </div>
+    <div class="fb-breadcrumb" id="dbBreadcrumb"></div>
+    <div class="fb-list" id="dbList"><div class="fb-empty">Loading...</div></div>
+    <div class="fb-bar">
+      <button class="fb-use-btn" id="dbUseBtn">📍 Use this folder</button>
+      <button class="fb-cancel-btn" id="dbCancelBtn">Cancel</button>
+    </div>
   </div>
   <div class="fb-panel" id="folderBrowser">
     <div style="padding:.5rem .6rem; background:#0d1f3c; border-bottom:1px solid #1a3a5c; font-size:.85rem; color:#4fc3f7; font-weight:600; display:flex; justify-content:space-between; align-items:center;">
@@ -273,6 +288,16 @@ var fbBreadcrumb = document.getElementById('fbBreadcrumb');
 var fbList = document.getElementById('fbList');
 var fbUseBtn = document.getElementById('fbUseBtn');
 var fbCancelBtn = document.getElementById('fbCancelBtn');
+var destBrowser = document.getElementById('destBrowser');
+var dbBreadcrumb = document.getElementById('dbBreadcrumb');
+var dbList = document.getElementById('dbList');
+var dbUseBtn = document.getElementById('dbUseBtn');
+var dbCancelBtn = document.getElementById('dbCancelBtn');
+var destBrowseBtn = document.getElementById('destBrowseBtn');
+var destLabel = document.getElementById('destLabel');
+
+// destPath: relative path within D:\art to save into ('' = root)
+var destPath = '';
 
 var selectedFiles = [];
 var allBrowsedFiles = [];
@@ -577,6 +602,71 @@ fbCancelBtn.addEventListener('click', function() {
   folderBrowser.classList.remove('active');
 });
 
+// --- Destination browser (server-side /dir-tree) ---
+var dbCurrentPath = '';
+
+async function dbLoadDir(subpath) {
+  dbCurrentPath = subpath;
+  dbList.innerHTML = '<div class="fb-empty">Loading...</div>';
+  // Breadcrumb
+  var parts = subpath ? subpath.split('/') : [];
+  var bcHtml = '<span class="fb-crumb" data-dbpath="">D:\\art</span>';
+  var acc = '';
+  for (var i = 0; i < parts.length; i++) {
+    if (!parts[i]) continue;
+    acc = acc ? acc + '/' + parts[i] : parts[i];
+    bcHtml += '<span class="fb-sep">/</span><span class="fb-crumb" data-dbpath="' + acc + '">' + parts[i] + '</span>';
+  }
+  dbBreadcrumb.innerHTML = bcHtml;
+  dbBreadcrumb.querySelectorAll('.fb-crumb').forEach(function(el) {
+    el.addEventListener('click', function() { dbLoadDir(el.getAttribute('data-dbpath')); });
+  });
+  // Fetch dir listing from server
+  try {
+    var resp = await fetch('/dir-tree?path=' + encodeURIComponent(subpath));
+    var dirs = await resp.json();
+    if (!dirs.length) {
+      dbList.innerHTML = '<div class="fb-empty">No subfolders here</div>';
+    } else {
+      var html = '';
+      dirs.forEach(function(d) {
+        html += '<div class="fb-folder" data-dbsub="' + d + '">'
+          + '<span style="font-size:1.1rem;margin-right:.4rem">📁</span>'
+          + '<div style="flex:1"><div style="font-weight:600">' + d + '</div></div>'
+          + '<span style="font-size:.75rem;color:#555">▶</span></div>';
+      });
+      dbList.innerHTML = html;
+      dbList.querySelectorAll('.fb-folder').forEach(function(el) {
+        el.addEventListener('click', function() {
+          var sub = el.getAttribute('data-dbsub');
+          var newPath = dbCurrentPath ? dbCurrentPath + '/' + sub : sub;
+          dbLoadDir(newPath);
+        });
+      });
+    }
+    var displayName = subpath ? subpath.split('/').pop() : 'root';
+    dbUseBtn.textContent = '📍 Use: D:\\art' + (subpath ? '\\' + subpath.replace(/\//g, '\\') : '') + ' (' + displayName + ')';
+  } catch(e) {
+    dbList.innerHTML = '<div class="fb-empty">Error: ' + e.message + '</div>';
+  }
+}
+
+destBrowseBtn.addEventListener('click', function() {
+  destBrowser.classList.add('active');
+  dbLoadDir('');
+});
+
+dbCancelBtn.addEventListener('click', function() {
+  destBrowser.classList.remove('active');
+});
+
+dbUseBtn.addEventListener('click', function() {
+  destPath = dbCurrentPath;
+  var display = destPath ? 'D:\\art\\' + destPath.replace(/\//g, '\\') : 'D:\\art (root)';
+  destLabel.textContent = display;
+  destBrowser.classList.remove('active');
+});
+
 selectFolderBtn.addEventListener('click', async function() {
   if (window.showDirectoryPicker && window.isSecureContext) {
     try {
@@ -868,12 +958,12 @@ async function sendFiles(files) {
   statusText.textContent = "Checking what's on server...";
   statusText.style.color = '';
 
-  // Build flat file list with relative paths
-  const allFileList = files.map(f => ({
-    _file: f,
-    name: f._relativePath || f.webkitRelativePath || f.name,
-    size: f.size
-  }));
+  // Build flat file list with relative paths, prepend chosen destination
+  const allFileList = files.map(f => {
+    var relPath = f._relativePath || f.webkitRelativePath || f.name;
+    var uploadName = destPath ? destPath + '/' + relPath : relPath;
+    return { _file: f, name: uploadName, size: f.size };
+  });
 
   let missingFiles = allFileList;
   try {
