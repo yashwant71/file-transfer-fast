@@ -1,9 +1,0 @@
-=======================================================
-SENDER:  http://192.168.137.1:8001
-STATUS:  http://192.168.137.1:8001/status
-SAVES TO: D:\art
-=======================================================
-[9:21:06 am] Server started
-[DIFF] checked=1 exist=0 missing=1
-[9:21:08 am] DIFF: 0 exist, 1 missing (1 B to send)
-[CHECK] NOT FOUND: x -> will send

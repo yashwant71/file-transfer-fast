@@ -6,10 +6,13 @@ const path = require('path');
 const HTTP_PORT = 8001;
 const HTTPS_PORT = 8443;
 const HOST_IP = '192.168.137.1';
-const SAVE_DIR = 'D:\\art';
+let saveDir = 'D:\\art';
 const CERT_DIR = path.join(__dirname, '.cert');
-if (!fs.existsSync(SAVE_DIR)) fs.mkdirSync(SAVE_DIR, { recursive: true });
+if (!fs.existsSync(saveDir)) fs.mkdirSync(saveDir, { recursive: true });
 if (!fs.existsSync(CERT_DIR)) fs.mkdirSync(CERT_DIR, { recursive: true });
+
+// Performance: increase UV threadpool for concurrent file I/O
+process.env.UV_THREADPOOL_SIZE = '16';
 
 // Generate or load self-signed certificate (async API in newer selfsigned)
 async function getTlsOptions() {
@@ -45,7 +48,8 @@ function addLog(msg, type = 'info', size = 0, dedupKey = '') {
   const entry = { time: new Date().toLocaleTimeString(), msg, type, size, dedupKey };
   logEvents.push(entry);
   if (logEvents.length > MAX_LOG) logEvents.shift();
-  console.log(`[${entry.time}] ${msg}`);
+  // Use setImmediate to avoid blocking the event loop during transfers
+  setImmediate(() => console.log(`[${entry.time}] ${msg}`));
 }
 
 function fmtBytes(b) {
@@ -168,18 +172,47 @@ const senderHtml = `<!DOCTYPE html>
     .fb-use-btn { flex:1; background:#1a5c3a; color:#4eff8a; border:none; padding:.5rem; border-radius:6px; font-size:.85rem; cursor:pointer; font-weight:600; }
     .fb-use-btn:active { background:#0f4a2e; }
     .fb-cancel-btn { background:#333; color:#aaa; border:none; padding:.5rem .8rem; border-radius:6px; font-size:.85rem; cursor:pointer; }
+
+    .skip-panel { margin-bottom:.5rem; background:#0a1628; border:1px solid #1a3a5c; border-radius:8px; overflow:hidden; }
+    .skip-panel-head { display:flex; align-items:center; justify-content:space-between; padding:.45rem .7rem; cursor:pointer; }
+    .skip-panel-head span { font-size:.85rem; color:#8ab4f8; }
+    .skip-tags { display:flex; flex-wrap:wrap; gap:.3rem; padding:0 .7rem .5rem; }
+    .skip-tag { display:inline-flex; align-items:center; gap:.3rem; background:#1a3a5c; color:#ccc; padding:.2rem .5rem; border-radius:12px; font-size:.75rem; }
+    .skip-tag .x { cursor:pointer; color:#f66; font-weight:700; margin-left:.1rem; }
+    .skip-tag .x:hover { color:#f33; }
+    .skip-add { display:flex; gap:.3rem; padding:0 .7rem .5rem; }
+    .skip-add input { flex:1; background:#111; border:1px solid #333; color:#ccc; padding:.3rem .5rem; border-radius:6px; font-size:.8rem; }
+    .skip-add button { background:#1a3a5c; color:#8ab4f8; border:none; padding:.3rem .7rem; border-radius:6px; font-size:.8rem; cursor:pointer; font-weight:600; }
+    .stop-btn { background:#f33; color:#fff; border:none; padding:.6rem 1rem; border-radius:8px; font-size:.95rem; cursor:pointer; font-weight:600; }
+    .stop-btn:disabled { opacity:.4; cursor:not-allowed; }
+    .resend-btn { background:#ff9800; color:#111; border:none; padding:.6rem 1rem; border-radius:8px; font-size:.95rem; cursor:pointer; font-weight:600; }
+    .resend-btn:disabled { opacity:.4; cursor:not-allowed; }
   </style>
 </head>
 <body>
 <div class="center">
 <div class="card">
   <h2>Send to this PC</h2>
-  <p class="sub">Saves to D:\\art &bull; smart folder skip</p>
+  <div class="sub" id="saveToLabel">Saves to D:\\art &bull; smart folder skip</div>
+  <div class="skip-panel" id="skipPanel">
+    <div class="skip-panel-head" id="skipPanelHead">
+      <span>⚙️ Skip Folders</span>
+      <span style="font-size:.75rem;color:#666" id="skipCount"></span>
+    </div>
+    <div id="skipPanelBody" style="display:none">
+      <div class="skip-tags" id="skipTags"></div>
+      <div class="skip-add">
+        <input type="text" id="skipInput" placeholder="folder name (e.g. dist)">
+        <button id="skipAddBtn">+ Add</button>
+      </div>
+    </div>
+  </div>
+
   <!-- Destination row -->
   <div style="margin-bottom:.5rem;display:flex;gap:.5rem;align-items:center;background:#0a1628;border:1px solid #1a3a5c;border-radius:8px;padding:.5rem .7rem">
-    <span style="font-size:.85rem;color:#8ab4f8;flex:0 0 auto">📥 Save to:</span>
-    <span id="destLabel" style="flex:1;font-size:.85rem;color:#ccc;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">D:\art (root)</span>
-    <button id="destBrowseBtn" style="background:#1a3a5c;color:#8ab4f8;border:none;padding:.35rem .75rem;border-radius:6px;font-size:.8rem;cursor:pointer;font-weight:600;white-space:nowrap">📁 Change</button>
+    <span style="font-size:.85rem;color:#8ab4f8;flex:0 0 auto">\ud83d\udce5 Save to:</span>
+    <span id="destLabel" style="flex:1;font-size:.85rem;color:#ccc;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">D:\\art (root)</span>
+    <button id="destBrowseBtn" style="background:#1a3a5c;color:#8ab4f8;border:none;padding:.35rem .75rem;border-radius:6px;font-size:.8rem;cursor:pointer;font-weight:600;white-space:nowrap">\ud83d\udcc1 Change</button>
   </div>
   <!-- Destination browser panel (server-side folder tree) -->
   <div class="fb-panel" id="destBrowser">
@@ -191,19 +224,8 @@ const senderHtml = `<!DOCTYPE html>
     <div class="fb-list" id="dbList"><div class="fb-empty">Loading...</div></div>
     <div class="fb-bar">
       <button class="fb-use-btn" id="dbUseBtn">📍 Use this folder</button>
+      <button id="dbRootBtn" style="background:#3a1a5c;color:#c084fc;border:none;padding:.5rem .8rem;border-radius:6px;font-size:.85rem;cursor:pointer;font-weight:600;white-space:nowrap">⬆️ Set as Root</button>
       <button class="fb-cancel-btn" id="dbCancelBtn">Cancel</button>
-    </div>
-  </div>
-  <div class="fb-panel" id="folderBrowser">
-    <div style="padding:.5rem .6rem; background:#0d1f3c; border-bottom:1px solid #1a3a5c; font-size:.85rem; color:#4fc3f7; font-weight:600; display:flex; justify-content:space-between; align-items:center;">
-      <span>📂 Browse Folders to Send</span>
-      <span style="font-size:.75rem; color:#888; font-weight:normal;">tap folder to go in &bull; tap Send to upload</span>
-    </div>
-    <div class="fb-breadcrumb" id="fbBreadcrumb"></div>
-    <div class="fb-list" id="fbList"><div class="fb-empty">Loading...</div></div>
-    <div class="fb-bar">
-      <button class="fb-use-btn" id="fbUseBtn">📤 Send this folder</button>
-      <button class="fb-cancel-btn" id="fbCancelBtn">Cancel</button>
     </div>
   </div>
   <div class="drop-zone" id="dropZone" style="border: 2px dashed #444; border-radius: 12px; padding: 1.5rem; text-align: center; cursor: default;">
@@ -219,6 +241,8 @@ const senderHtml = `<!DOCTYPE html>
   <div id="subfolderList" style="display:none;margin:.5rem 0;max-height:200px;overflow-y:auto;background:#0a1628;border:1px solid #1a3a5c;border-radius:8px;padding:.5rem"></div>
   <div class="top-bar">
     <button class="btn" id="sendBtn" disabled>Send</button>
+    <button class="btn" id="stopBtn" style="display:none;background:#f33;color:#fff">Stop</button>
+    <button class="btn" id="resendBtn" style="display:none;background:#ff9800;color:#111">Resend All</button>
   </div>
   <div class="file-info" id="fileInfo"></div>
   <div class="progress-wrap" id="progressWrap">
@@ -252,828 +276,14 @@ const senderHtml = `<!DOCTYPE html>
 </div>
 
 <script>
-window.onerror = function(msg, url, line) {
-  const statusText = document.getElementById('statusText');
-  const progressWrap = document.getElementById('progressWrap');
-  if (progressWrap) progressWrap.classList.add('active');
-  if (statusText) {
-    statusText.innerHTML = 'JS ERROR: ' + msg + ' (line ' + line + ')';
-    statusText.style.color = '#f33';
-  }
-  console.error('JS ERROR:', msg, 'at line', line);
-};
-var dropZone = document.getElementById('dropZone');
-var fileInput = document.getElementById('fileInput');
-var folderInput = document.getElementById('folderInput');
-var selectFolderBtn = document.getElementById('selectFolderBtn');
-var selectFilesBtn = document.getElementById('selectFilesBtn');
-var sendBtn = document.getElementById('sendBtn');
-var retryBtn = document.getElementById('retryBtn');
-var progressWrap = document.getElementById('progressWrap');
-var barFill = document.getElementById('barFill');
-var pctText = document.getElementById('pctText');
-var countText = document.getElementById('countText');
-var speedText = document.getElementById('speedText');
-var fileInfo = document.getElementById('fileInfo');
-var statusText = document.getElementById('statusText');
-var failedWrap = document.getElementById('failedWrap');
-var failedTitle = document.getElementById('failedTitle');
-var logPanel = document.getElementById('logPanel');
-var savedCountEl = document.getElementById('savedCount');
-var skipCountEl = document.getElementById('skipCount');
-var failCountEl = document.getElementById('failCount');
-var summaryBar = document.getElementById('summaryBar');
-var folderBrowser = document.getElementById('folderBrowser');
-var fbBreadcrumb = document.getElementById('fbBreadcrumb');
-var fbList = document.getElementById('fbList');
-var fbUseBtn = document.getElementById('fbUseBtn');
-var fbCancelBtn = document.getElementById('fbCancelBtn');
-var destBrowser = document.getElementById('destBrowser');
-var dbBreadcrumb = document.getElementById('dbBreadcrumb');
-var dbList = document.getElementById('dbList');
-var dbUseBtn = document.getElementById('dbUseBtn');
-var dbCancelBtn = document.getElementById('dbCancelBtn');
-var destBrowseBtn = document.getElementById('destBrowseBtn');
-var destLabel = document.getElementById('destLabel');
-
-// destPath: relative path within D:\art to save into ('' = root)
-var destPath = '';
-
-var selectedFiles = [];
-var allBrowsedFiles = [];
-var localFailed = [];
-var localSaved = 0;
-var localSkipped = 0;
-var localFailedCount = 0;
-var localSavedBytes = 0;
-var localSkippedBytes = 0;
-var localFailedBytes = 0;
-var lastLogId = 0;
-var activeFilter = 'all';
-var allLogs = [];
-var autoSendAfterPick = false;
-
-var localTreeRoot = null;
-var localTreeCurrent = null;
-
-function buildLocalTree(files) {
-  var firstPath = files[0]._relativePath || files[0].webkitRelativePath || files[0].name;
-  var firstPart = firstPath.split('/')[0];
-  var root = { name: firstPart, path: firstPart, children: {}, files: [] };
-  for (var i = 0; i < files.length; i++) {
-    var f = files[i];
-    var pathStr = f._relativePath || f.webkitRelativePath || f.name;
-    var parts = pathStr.split('/');
-    var current = root;
-    var currentPath = firstPart;
-    for (var j = 1; j < parts.length - 1; j++) {
-      var part = parts[j];
-      currentPath = currentPath + '/' + part;
-      if (!current.children[part]) {
-        current.children[part] = { name: part, path: currentPath, children: {}, files: [] };
-      }
-      current = current.children[part];
-    }
-    current.files.push(f);
-  }
-  return root;
-}
-
-function showLocalBrowser(treeNode) {
-  localTreeCurrent = treeNode;
-  var parts = treeNode.path.split('/');
-  var bcHtml = '';
-  var accumulated = '';
-  for (var i = 0; i < parts.length; i++) {
-    accumulated = accumulated ? accumulated + '/' + parts[i] : parts[i];
-    var activeClass = (i === parts.length - 1) ? ' style="color:#fff;font-weight:600;"' : '';
-    if (i > 0) bcHtml += '<span class="fb-sep">/</span>';
-    bcHtml += '<span class="fb-crumb" data-path="' + accumulated + '"' + activeClass + '>' + parts[i] + '</span>';
-  }
-  fbBreadcrumb.innerHTML = bcHtml;
-  var listHtml = '';
-  var childKeys = Object.keys(treeNode.children).sort();
-  for (var k = 0; k < childKeys.length; k++) {
-    var child = treeNode.children[childKeys[k]];
-    var fileCount = countFilesInNode(child);
-    var sizeStr = fmtGB(sizeInNode(child));
-    listHtml += '<div class="fb-folder" data-path="' + child.path + '">' +
-                '<span style="font-size:1.1rem;margin-right:.4rem">📁</span>' +
-                '<div style="flex:1;">' +
-                  '<div style="font-weight:600;">' + child.name + '</div>' +
-                  '<div style="font-size:.7rem;color:#888;">' + fileCount + ' files (' + sizeStr + ')</div>' +
-                '</div>' +
-                '</div>';
-  }
-  for (var f = 0; f < treeNode.files.length; f++) {
-    var file = treeNode.files[f];
-    listHtml += '<div class="fb-file" style="padding:.55rem .7rem; border-bottom:1px solid #1a1a1a; font-size:.85rem; color:#aaa; display:flex; align-items:center; gap:.5rem;">' +
-                '<span style="font-size:1.1rem;margin-right:.2rem">📄</span>' +
-                '<span>' + file.name + ' (' + fmtGB(file.size) + ')</span>' +
-                '</div>';
-  }
-  if (childKeys.length === 0 && treeNode.files.length === 0) {
-    listHtml = '<div class="fb-empty">Folder is empty</div>';
-  }
-  fbList.innerHTML = listHtml;
-  fbUseBtn.textContent = '📤 Send Folder: ' + treeNode.name + ' (' + countFilesInNode(treeNode) + ' files)';
-}
-
-function countFilesInNode(node) {
-  var count = node.files.length;
-  var childKeys = Object.keys(node.children);
-  for (var i = 0; i < childKeys.length; i++) {
-    count += countFilesInNode(node.children[childKeys[i]]);
-  }
-  return count;
-}
-
-function sizeInNode(node) {
-  var size = node.files.reduce(function(s, f) { return s + f.size; }, 0);
-  var childKeys = Object.keys(node.children);
-  for (var i = 0; i < childKeys.length; i++) {
-    size += sizeInNode(node.children[childKeys[i]]);
-  }
-  return size;
-}
-
-function collectFilesInNode(node) {
-  var files = [].concat(node.files);
-  var childKeys = Object.keys(node.children);
-  for (var i = 0; i < childKeys.length; i++) {
-    files = files.concat(collectFilesInNode(node.children[childKeys[i]]));
-  }
-  return files;
-}
-
-function findNodeByPath(node, pathStr) {
-  if (node.path === pathStr) return node;
-  var childKeys = Object.keys(node.children);
-  for (var i = 0; i < childKeys.length; i++) {
-    var found = findNodeByPath(node.children[childKeys[i]], pathStr);
-    if (found) return found;
-  }
-  return null;
-}
-
-// (folder browser listeners now in the lazy browser section below)
-
-dropZone.addEventListener('dragover', function(e) { e.preventDefault(); e.dataTransfer.dropEffect = 'copy'; dropZone.classList.add('dragover'); });
-dropZone.addEventListener('dragleave', function() { dropZone.classList.remove('dragover'); });
-dropZone.addEventListener('drop', function(e) {
-  e.preventDefault();
-  dropZone.classList.remove('dragover');
-  var allFiles = [];
-  var pending = [];
-  Array.from(e.dataTransfer.items).forEach(function(item) {
-    var entry = item.webkitGetAsEntry ? item.webkitGetAsEntry() : null;
-    if (entry) pending.push(scanEntry(entry, ''));
-  });
-  if (!pending.length) {
-    Array.from(e.dataTransfer.files).forEach(function(f) { f._relativePath = f.name; allFiles.push(f); });
-    finish();
-    return;
-  }
-  Promise.all(pending).then(finish);
-  function finish() {
-    if (allFiles.length) handleFilesWithSubfolders(allFiles);
-  }
-  function scanEntry(entry, base) {
-    return new Promise(function(res) {
-      if (entry.isFile) {
-        entry.file(function(f) { f._relativePath = base + f.name; allFiles.push(f); res(); }, function() { res(); });
-      } else if (entry.isDirectory) {
-        var reader = entry.createReader();
-        var dirPath = base + entry.name + '/';
-        (function readAll() {
-          reader.readEntries(function(batch) {
-            if (!batch.length) { res(); return; }
-            Promise.all(Array.from(batch).map(function(e2) { return scanEntry(e2, dirPath); })).then(readAll);
-          }, function() { res(); });
-        })();
-      } else res();
-    });
-  }
-});
-
-function handleFilesWithSubfolders(files) {
-  allBrowsedFiles = files;
-  allBrowsedFiles.forEach(function(f) {
-    if (!f._relativePath) f._relativePath = f.webkitRelativePath || f.name;
-  });
-  localTreeRoot = buildLocalTree(allBrowsedFiles);
-  folderBrowser.classList.add('active');
-  showLocalBrowser(localTreeRoot);
-}
-
-// --- Lazy folder browser (FileSystem Access API) ---
-var lbHandles = {};   // path -> FileSystemDirectoryHandle
-var lbCurrent = '';   // current path string
-var lbRoot = '';      // root folder name
-
-async function lbLoadDir(handle, path) {
-  lbHandles[path] = handle;
-  lbCurrent = path;
-  var subfolders = [];
-  var fileCount = 0;
-  for await (var entry of handle.values()) {
-    if (entry.kind === 'directory') subfolders.push(entry.name);
-    else fileCount++;
-  }
-  subfolders.sort(function(a,b){ return a.toLowerCase().localeCompare(b.toLowerCase()); });
-
-  // Breadcrumb
-  var parts = path ? path.split('/') : [];
-  var bcHtml = '<span class="fb-crumb" data-lbpath="">' + lbRoot + '</span>';
-  var acc = '';
-  for (var i = 0; i < parts.length; i++) {
-    if (!parts[i]) continue;
-    acc = acc ? acc + '/' + parts[i] : parts[i];
-    bcHtml += '<span class="fb-sep">/</span><span class="fb-crumb" data-lbpath="' + acc + '">' + parts[i] + '</span>';
-  }
-  fbBreadcrumb.innerHTML = bcHtml;
-
-  // List
-  var listHtml = '';
-  if (subfolders.length === 0 && fileCount === 0) {
-    listHtml = '<div class="fb-empty">Empty folder</div>';
-  } else {
-    for (var k = 0; k < subfolders.length; k++) {
-      listHtml += '<div class="fb-folder" data-lbsub="' + subfolders[k] + '">'
-        + '<span style="font-size:1.1rem;margin-right:.4rem">📁</span>'
-        + '<div style="flex:1"><div style="font-weight:600">' + subfolders[k] + '</div></div>'
-        + '<span style="font-size:.75rem;color:#555">▶</span>'
-        + '</div>';
-    }
-    if (fileCount > 0) {
-      listHtml += '<div style="padding:.4rem .7rem;font-size:.75rem;color:#666;border-top:1px solid #1a1a1a">' + fileCount + ' file(s) in this folder</div>';
-    }
-  }
-  fbList.innerHTML = listHtml;
-
-  var displayName = path ? path.split('/').pop() : lbRoot;
-  fbUseBtn.textContent = '📤 Send: ' + displayName;
-}
-
-fbList.addEventListener('click', async function(e) {
-  var el = e.target.closest('.fb-folder');
-  if (!el) return;
-  var subName = el.getAttribute('data-lbsub');
-  var parentHandle = lbHandles[lbCurrent];
-  if (!parentHandle) return;
-  try {
-    var subHandle = await parentHandle.getDirectoryHandle(subName);
-    var newPath = lbCurrent ? lbCurrent + '/' + subName : subName;
-    await lbLoadDir(subHandle, newPath);
-  } catch(e) { console.error(e); }
-});
-
-fbBreadcrumb.addEventListener('click', async function(e) {
-  var el = e.target.closest('.fb-crumb');
-  if (!el) return;
-  var targetPath = el.getAttribute('data-lbpath');
-  var handle = lbHandles[targetPath];
-  if (handle) await lbLoadDir(handle, targetPath);
-});
-
-async function readDirHandleRecursive(handle, basePath) {
-  var results = [];
-  for await (var entry of handle.values()) {
-    var entryPath = basePath ? basePath + '/' + entry.name : entry.name;
-    if (entry.kind === 'file') {
-      var file = await entry.getFile();
-      file._relativePath = entryPath;
-      results.push(file);
-    } else if (entry.kind === 'directory') {
-      var sub = await readDirHandleRecursive(entry, entryPath);
-      results = results.concat(sub);
-    }
-  }
-  return results;
-}
-
-// fbUseBtn handles both API and virtual fallback
-fbUseBtn.addEventListener('click', async function() {
-  // Virtual tree path (webkitdirectory fallback)
-  if (lbVirtualTree && lbVirtualCurrent) {
-    var files = collectVirtualFiles(lbVirtualCurrent);
-    folderBrowser.classList.remove('active');
-    if (!files.length) { statusText.textContent = 'No files in this folder.'; progressWrap.classList.add('active'); return; }
-    // Strip root folder name from paths so selected folder isn't recreated on server
-    var rootStrip = lbRoot + '/';
-    files.forEach(function(f) {
-      if (f._relativePath && f._relativePath.startsWith(rootStrip))
-        f._relativePath = f._relativePath.slice(rootStrip.length);
-    });
-    selectedFiles = files;
-    updateFileList();
-    startSend();
-    return;
-  }
-  // FileSystem Access API path
-  var handle = lbHandles[lbCurrent];
-  if (!handle) return;
-  folderBrowser.classList.remove('active');
-  progressWrap.classList.add('active');
-  statusText.style.color = '';
-  var folderName = lbCurrent ? lbCurrent.split('/').pop() : lbRoot;
-  statusText.textContent = 'Reading files in ' + folderName + '...';
-  try {
-    var baseName = lbCurrent || lbRoot;
-    var files = await readDirHandleRecursive(handle, baseName);
-    if (!files.length) { statusText.textContent = 'No files found in that folder.'; return; }
-    // Strip root folder name from paths
-    var rootStrip = lbRoot + '/';
-    files.forEach(function(f) {
-      if (f._relativePath && f._relativePath.startsWith(rootStrip))
-        f._relativePath = f._relativePath.slice(rootStrip.length);
-    });
-    progressWrap.classList.remove('active');
-    selectedFiles = files;
-    updateFileList();
-    startSend();
-  } catch(e) {
-    progressWrap.classList.remove('active');
-    statusText.textContent = 'Error reading files: ' + e.message;
-  }
-});
-
-fbCancelBtn.addEventListener('click', function() {
-  folderBrowser.classList.remove('active');
-});
-
-// --- Destination browser (server-side /dir-tree) ---
-var dbCurrentPath = '';
-
-async function dbLoadDir(subpath) {
-  dbCurrentPath = subpath;
-  dbList.innerHTML = '<div class="fb-empty">Loading...</div>';
-  // Breadcrumb
-  var parts = subpath ? subpath.split('/') : [];
-  var bcHtml = '<span class="fb-crumb" data-dbpath="">D:\\art</span>';
-  var acc = '';
-  for (var i = 0; i < parts.length; i++) {
-    if (!parts[i]) continue;
-    acc = acc ? acc + '/' + parts[i] : parts[i];
-    bcHtml += '<span class="fb-sep">/</span><span class="fb-crumb" data-dbpath="' + acc + '">' + parts[i] + '</span>';
-  }
-  dbBreadcrumb.innerHTML = bcHtml;
-  dbBreadcrumb.querySelectorAll('.fb-crumb').forEach(function(el) {
-    el.addEventListener('click', function() { dbLoadDir(el.getAttribute('data-dbpath')); });
-  });
-  // Fetch dir listing from server
-  try {
-    var resp = await fetch('/dir-tree?path=' + encodeURIComponent(subpath));
-    var dirs = await resp.json();
-    if (!dirs.length) {
-      dbList.innerHTML = '<div class="fb-empty">No subfolders here</div>';
-    } else {
-      var html = '';
-      dirs.forEach(function(d) {
-        html += '<div class="fb-folder" data-dbsub="' + d + '">'
-          + '<span style="font-size:1.1rem;margin-right:.4rem">📁</span>'
-          + '<div style="flex:1"><div style="font-weight:600">' + d + '</div></div>'
-          + '<span style="font-size:.75rem;color:#555">▶</span></div>';
-      });
-      dbList.innerHTML = html;
-      dbList.querySelectorAll('.fb-folder').forEach(function(el) {
-        el.addEventListener('click', function() {
-          var sub = el.getAttribute('data-dbsub');
-          var newPath = dbCurrentPath ? dbCurrentPath + '/' + sub : sub;
-          dbLoadDir(newPath);
-        });
-      });
-    }
-    var displayName = subpath ? subpath.split('/').pop() : 'root';
-    dbUseBtn.textContent = '📍 Use: D:\\art' + (subpath ? '\\' + subpath.replace(/\//g, '\\') : '') + ' (' + displayName + ')';
-  } catch(e) {
-    dbList.innerHTML = '<div class="fb-empty">Error: ' + e.message + '</div>';
-  }
-}
-
-destBrowseBtn.addEventListener('click', function() {
-  destBrowser.classList.add('active');
-  dbLoadDir('');
-});
-
-dbCancelBtn.addEventListener('click', function() {
-  destBrowser.classList.remove('active');
-});
-
-dbUseBtn.addEventListener('click', function() {
-  destPath = dbCurrentPath;
-  var display = destPath ? 'D:\\art\\' + destPath.replace(/\//g, '\\') : 'D:\\art (root)';
-  destLabel.textContent = display;
-  destBrowser.classList.remove('active');
-});
-
-selectFolderBtn.addEventListener('click', async function() {
-  if (window.showDirectoryPicker && window.isSecureContext) {
-    try {
-      var dirHandle = await window.showDirectoryPicker({ mode: 'read' });
-      lbHandles = {};
-      lbRoot = dirHandle.name;
-      lbCurrent = '';
-      lbHandles[''] = dirHandle;
-      folderBrowser.classList.add('active');
-      await lbLoadDir(dirHandle, '');
-    } catch(e) {
-      if (e.name !== 'AbortError') {
-        statusText.textContent = 'Error: ' + e.message;
-        progressWrap.classList.add('active');
-      }
-    }
-  } else {
-    // HTTP fallback: use webkitdirectory input
-    // Show hint so user knows to navigate INTO the specific folder
-    showPickerHint();
-    folderInput.value = '';
-    folderInput.click();
-  }
-});
-
-function showPickerHint() {
-  var hint = document.getElementById('pickerHint');
-  if (!hint) {
-    hint = document.createElement('div');
-    hint.id = 'pickerHint';
-    hint.style.cssText = 'position:fixed;bottom:1rem;left:50%;transform:translateX(-50%);background:#1a3a5c;color:#8ab4f8;padding:.6rem 1rem;border-radius:8px;font-size:.8rem;z-index:999;max-width:90vw;text-align:center;box-shadow:0 4px 12px rgba(0,0,0,.5);';
-    hint.textContent = '💡 Navigate into the specific folder you want to send, then tap Select';
-    document.body.appendChild(hint);
-    setTimeout(function() { if (hint.parentNode) hint.parentNode.removeChild(hint); }, 5000);
-  }
-}
-
-folderInput.addEventListener('change', function() {
-  if (!folderInput.files.length) return;
-  var fileArr = Array.from(folderInput.files);
-  fileArr.forEach(function(f) {
-    f._relativePath = f.webkitRelativePath || f.name;
-  });
-  // Build virtual dir tree and show lazy browser
-  var vRoot = buildVirtualTree(fileArr);
-  lbHandles = {};
-  lbRoot = vRoot.name;
-  lbCurrent = '';
-  lbVirtualTree = vRoot;
-  folderBrowser.classList.add('active');
-  lbShowVirtualNode(vRoot, '');
-});
-
-// Virtual tree for webkitdirectory fallback
-var lbVirtualTree = null;
-
-function buildVirtualTree(files) {
-  // files have _relativePath like "root/sub/file.jpg"
-  var root = null;
-  files.forEach(function(f) {
-    var parts = f._relativePath.split('/');
-    if (!root) root = { name: parts[0], path: '', children: {}, files: [] };
-    var node = root;
-    for (var i = 1; i < parts.length - 1; i++) {
-      if (!node.children[parts[i]]) {
-        var childPath = node.path ? node.path + '/' + parts[i] : parts[i];
-        node.children[parts[i]] = { name: parts[i], path: childPath, children: {}, files: [] };
-      }
-      node = node.children[parts[i]];
-    }
-    node.files.push(f);
-  });
-  return root || { name: '(empty)', path: '', children: {}, files: [] };
-}
-
-function findVirtualNode(node, path) {
-  if (!path || node.path === path) return node;
-  var keys = Object.keys(node.children);
-  for (var i = 0; i < keys.length; i++) {
-    var found = findVirtualNode(node.children[keys[i]], path);
-    if (found) return found;
-  }
-  return null;
-}
-
-function lbShowVirtualNode(node, path) {
-  lbCurrent = path;
-  var subfolders = Object.keys(node.children).sort(function(a,b){ return a.toLowerCase().localeCompare(b.toLowerCase()); });
-  var fileCount = node.files.length;
-
-  // Breadcrumb
-  var parts = path ? path.split('/') : [];
-  var bcHtml = '<span class="fb-crumb" data-lbvpath="">' + lbRoot + '</span>';
-  var acc = '';
-  for (var i = 0; i < parts.length; i++) {
-    if (!parts[i]) continue;
-    acc = acc ? acc + '/' + parts[i] : parts[i];
-    bcHtml += '<span class="fb-sep">/</span><span class="fb-crumb" data-lbvpath="' + acc + '">' + parts[i] + '</span>';
-  }
-  fbBreadcrumb.innerHTML = bcHtml;
-
-  // List
-  var listHtml = '';
-  if (subfolders.length === 0 && fileCount === 0) {
-    listHtml = '<div class="fb-empty">Empty folder</div>';
-  } else {
-    for (var k = 0; k < subfolders.length; k++) {
-      var child = node.children[subfolders[k]];
-      var childTotal = countVirtualFiles(child);
-      listHtml += '<div class="fb-folder" data-lbvpath="' + child.path + '">'
-        + '<span style="font-size:1.1rem;margin-right:.4rem">📁</span>'
-        + '<div style="flex:1"><div style="font-weight:600">' + subfolders[k] + '</div>'
-        + '<div style="font-size:.7rem;color:#888">' + childTotal + ' files</div></div>'
-        + '<span style="font-size:.75rem;color:#555">▶</span>'
-        + '</div>';
-    }
-    if (fileCount > 0) {
-      listHtml += '<div style="padding:.4rem .7rem;font-size:.75rem;color:#666;border-top:1px solid #1a1a1a">' + fileCount + ' file(s) in this folder</div>';
-    }
-  }
-  fbList.innerHTML = listHtml;
-
-  var displayName = path ? path.split('/').pop() : lbRoot;
-  var totalFiles = countVirtualFiles(node);
-  fbUseBtn.textContent = '📤 Send: ' + displayName + ' (' + totalFiles + ' files)';
-
-  // Wire virtual nav on breadcrumb
-  fbBreadcrumb.querySelectorAll('[data-lbvpath]').forEach(function(el) {
-    el.addEventListener('click', function() {
-      var p = el.getAttribute('data-lbvpath');
-      var n = findVirtualNode(lbVirtualTree, p) || lbVirtualTree;
-      lbShowVirtualNode(n, p);
-    });
-  });
-  fbList.querySelectorAll('[data-lbvpath]').forEach(function(el) {
-    el.addEventListener('click', function() {
-      var p = el.getAttribute('data-lbvpath');
-      var n = findVirtualNode(lbVirtualTree, p);
-      if (n) lbShowVirtualNode(n, p);
-    });
-  });
-
-  // Stash current node for fbUseBtn
-  lbVirtualCurrent = node;
-}
-
-function countVirtualFiles(node) {
-  var c = node.files.length;
-  Object.keys(node.children).forEach(function(k) { c += countVirtualFiles(node.children[k]); });
-  return c;
-}
-
-function collectVirtualFiles(node) {
-  var f = [].concat(node.files);
-  Object.keys(node.children).forEach(function(k) { f = f.concat(collectVirtualFiles(node.children[k])); });
-  return f;
-}
-
-var lbVirtualCurrent = null;
-
-selectFilesBtn.addEventListener('click', function() { fileInput.click(); });
-fileInput.addEventListener('change', function() {
-  if (!fileInput.files.length) return;
-  var fileArr = Array.from(fileInput.files);
-  fileArr.forEach(function(f) { f._relativePath = f.name; });
-  selectedFiles = fileArr;
-  updateFileList();
-});
-
-document.querySelectorAll('.log-tab').forEach(tab => {
-  tab.addEventListener('click', () => {
-    document.querySelectorAll('.log-tab').forEach(t => t.classList.remove('active'));
-    tab.classList.add('active');
-    activeFilter = tab.dataset.tab;
-    renderLogs();
-  });
-});
-
-async function fetchLogs() {
-  try {
-    const r = await fetch('/log-events?since=' + lastLogId);
-    const data = await r.json();
-    if (data.length) {
-      const existingDedupKeys = new Set(allLogs.filter(l => l.dedupKey).map(l => l.dedupKey));
-      data.forEach(e => {
-        if (e.dedupKey && existingDedupKeys.has(e.dedupKey)) return;
-        allLogs.push(e);
-        if (e.type === 'saved') { localSaved++; localSavedBytes += (e.size || 0); }
-        else if (e.type === 'skip') { localSkipped++; localSkippedBytes += (e.size || 0); }
-        else if (e.type === 'error') { localFailedCount++; localFailedBytes += (e.size || 0); }
-      });
-      lastLogId = data[data.length - 1].id;
-      updateCounts();
-      renderLogs();
-    }
-  } catch(e) {}
-}
-setInterval(fetchLogs, 500);
-
-function renderLogs() {
-  logPanel.innerHTML = '';
-  const filtered = activeFilter === 'all' ? allLogs : allLogs.filter(l => l.type === activeFilter);
-  if (!filtered.length) { logPanel.innerHTML = '<div style="color:#666">No entries yet</div>'; return; }
-  filtered.forEach(l => {
-    const d = document.createElement('div');
-    d.className = l.type;
-    let icon = '';
-    let cls = l.type;
-    if (l.type === 'saved') icon = '\u2705 ';
-    else if (l.type === 'skip') {
-      if (l.dedupKey && l.dedupKey.startsWith('folder:')) { icon = '\ud83d\udcc1 '; cls = 'folder-skip'; }
-      else icon = '\u23f3 ';
-    }
-    else if (l.type === 'error') icon = '\u274c ';
-    else if (l.type === 'info') icon = '\u2139\ufe0f ';
-    d.className = cls;
-    d.innerHTML = '<span class="time">[' + l.time + ']</span> ' + icon + l.msg;
-    logPanel.appendChild(d);
-  });
-  logPanel.scrollTop = logPanel.scrollHeight;
-}
-
-function fmtGB(b) {
-  if (b >= 1073741824) return (b / 1073741824).toFixed(1) + ' GB';
-  if (b >= 1048576) return (b / 1048576).toFixed(0) + ' MB';
-  return b + ' B';
-}
-function updateCounts() {
-  savedCountEl.textContent = localSaved + ' (' + fmtGB(localSavedBytes) + ')';
-  skipCountEl.textContent = localSkipped + ' (' + fmtGB(localSkippedBytes) + ')';
-  failCountEl.textContent = localFailedCount + ' (' + fmtGB(localFailedBytes) + ')';
-  if (localSaved + localSkipped + localFailedCount > 0) {
-    summaryBar.classList.add('active');
-    summaryBar.innerHTML =
-      '<div class="item"><span class="dot green"></span> Saved: ' + fmtGB(localSavedBytes) + '</div>' +
-      '<div class="item"><span class="dot yellow"></span> Skipped: ' + fmtGB(localSkippedBytes) + '</div>' +
-      '<div class="item"><span class="dot red"></span> Failed: ' + fmtGB(localFailedBytes) + '</div>';
-  }
-}
-
-function updateFileList() {
-  fileInfo.innerHTML = '';
-  const totalBytes = selectedFiles.reduce((s,f) => s + f.size, 0);
-  const totalFolders = new Set(selectedFiles.map(f => (f.webkitRelativePath || f.name).split('/')[0])).size;
-  fileInfo.textContent = selectedFiles.length + ' files in ' + totalFolders + ' folders, ~' + fmtGB(totalBytes);
-  sendBtn.disabled = false;
-}
-
-function buildFolderTree(files) {
-  const root = { name: '', children: {}, fileCount: 0, totalSize: 0, files: [] };
-  files.forEach(f => {
-    const p = f._relativePath || f.webkitRelativePath || f.name;
-    const parts = p.split('/');
-    let node = root;
-    for (let i = 0; i < parts.length - 1; i++) {
-      if (!node.children[parts[i]]) {
-        node.children[parts[i]] = { name: parts[i], children: {}, fileCount: 0, totalSize: 0, files: [] };
-      }
-      node = node.children[parts[i]];
-    }
-    node.files.push(f);
-    node.fileCount++;
-    node.totalSize += f.size;
-    root.fileCount++;
-    root.totalSize += f.size;
-  });
-  function toArray(node) {
-    node.children = Object.values(node.children);
-    node.children.forEach(toArray);
-  }
-  toArray(root);
-  return root;
-}
-
-function addLocalSkipLog(msg, size, dedupKey) {
-  const entry = { time: new Date().toLocaleTimeString(), msg, type: 'skip', size, dedupKey };
-  allLogs.push(entry);
-  localSkipped++;
-  localSkippedBytes += size;
-  updateCounts();
-  renderLogs();
-}
-
-async function sendFiles(files) {
-  sendBtn.disabled = true;
-  retryBtn.disabled = true;
-  progressWrap.classList.add('active');
-  barFill.style.width = '0%'; pctText.textContent = '0%';
-  statusText.textContent = "Checking what's on server...";
-  statusText.style.color = '';
-
-  // Build flat file list with relative paths, prepend chosen destination
-  const allFileList = files.map(f => {
-    var relPath = f._relativePath || f.webkitRelativePath || f.name;
-    var uploadName = destPath ? destPath + '/' + relPath : relPath;
-    return { _file: f, name: uploadName, size: f.size };
-  });
-
-  let missingFiles = allFileList;
-  try {
-    const diffResp = await fetch('/diff', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(allFileList.map(f => ({ name: f.name, size: f.size })))
-    });
-    const diff = await diffResp.json();
-
-    const existCount = diff.existCount || 0;
-    const missingSize = diff.missingSize || 0;
-
-    if (existCount > 0) {
-      addLocalSkipLog('SKIP: ' + existCount + ' files already on server (' + fmtGB(allFileList.reduce((s,f) => s + f.size, 0) - missingSize) + ')', allFileList.reduce((s,f) => s + f.size, 0) - missingSize, 'diff-skip');
-    }
-
-    if (diff.missingCount === 0) {
-      statusText.innerHTML = '\u2705 All ' + allFileList.length + ' files already on server!';
-      statusText.style.color = '#00e676';
-      sendBtn.disabled = false;
-      return;
-    }
-
-    statusText.textContent = diff.missingCount + ' files to send (' + fmtGB(missingSize) + ')...';
-    missingFiles = diff.missing.map(mf => {
-      const found = allFileList.find(f => f.name === mf.name && f.size === mf.size);
-      return found || null;
-    }).filter(Boolean);
-  } catch(e) {
-    statusText.textContent = 'Diff check failed, sending all files...';
-    missingFiles = allFileList;
-  }
-
-  const total = missingFiles.length;
-  let completed = 0;
-  const bytesTotal = missingFiles.reduce((s,f) => s + f.size, 0);
-  let bytesSent = 0;
-  const startTime = Date.now();
-  localFailed = [];
-
-  function updateUI() {
-    const pct = total > 0 ? Math.round((bytesSent / bytesTotal) * 100) : 0;
-    barFill.style.width = pct + '%'; pctText.textContent = pct + '%';
-    countText.textContent = completed + ' / ' + total;
-    const elapsed = (Date.now() - startTime) / 1000;
-    if (elapsed > 0.5) speedText.textContent = (bytesSent / 1024 / 1024 / elapsed).toFixed(1) + ' MB/s';
-  }
-
-  for (const item of missingFiles) {
-    const filePath = item.name;
-    statusText.textContent = '(' + (completed+1) + '/' + total + ') Sending: ' + filePath;
-
-    try {
-      const resp = await fetch('/upload?name=' + encodeURIComponent(filePath) + '&size=' + item.size, {
-        method: 'POST', body: item._file
-      });
-      const result = await resp.text();
-      completed++;
-      bytesSent += item.size;
-      updateUI();
-      statusText.textContent = '\u2705 ' + result;
-    } catch(err) {
-      completed++;
-      bytesSent += item.size;
-      localFailed.push({ file: item._file, reason: err.message });
-      updateUI();
-      statusText.textContent = '\u274c Failed: ' + filePath;
-    }
-  }
-
-  const elapsed = ((Date.now() - startTime) / 1000).toFixed(1);
-  const avgSpeed = bytesTotal > 0 ? (bytesTotal / 1024 / 1024 / (Date.now() - startTime) * 1000).toFixed(1) : 0;
-  statusText.innerHTML = '\u2705 Done! ' + total + ' files sent (' + fmtGB(bytesTotal) + '), ' + elapsed + 's, ' + avgSpeed + ' MB/s<br>' +
-    '<span style="color:#0f0">Sent: ' + fmtGB(localSavedBytes) + '</span> &bull; ' +
-    '<span style="color:#ff0">Skipped: ' + fmtGB(localSkippedBytes) + '</span> &bull; ' +
-    '<span style="color:#f33">Failed: ' + fmtGB(localFailedBytes) + '</span>';
-  statusText.style.color = '#00e676';
-  barFill.style.width = '100%'; pctText.textContent = '100%';
-
-  if (localFailed.length) {
-    failedWrap.classList.add('active');
-    failedTitle.textContent = 'Failed (' + localFailed.length + ')';
-    retryBtn.disabled = false;
-    retryBtn.onclick = () => {
-      failedWrap.classList.remove('active');
-      sendFiles(localFailed.map(f => f.file));
-    };
-  }
-
-  sendBtn.disabled = false;
-}
-
-sendBtn.addEventListener('click', function() {
-  if (!selectedFiles.length) return;
-  startSend();
-});
-
-function startSend() {
-  failedWrap.classList.remove('active');
-  localSaved = 0; localSkipped = 0; localFailedCount = 0;
-  localSavedBytes = 0; localSkippedBytes = 0; localFailedBytes = 0;
-  allLogs = [];
-  updateCounts();
-  renderLogs();
-  sendFiles(selectedFiles);
-}
+__CLIENT_JS__
 </script>
 </body>
 </html>`;
+
+// Inject client.js into senderHtml at startup (avoids template literal escaping issues)
+const clientJs = fs.readFileSync(path.join(__dirname, 'client.js'), 'utf8');
+const senderHtmlFinal = senderHtml.replace('__CLIENT_JS__', clientJs);
 
 const statusHtml = `<!DOCTYPE html>
 <html>
@@ -1160,12 +370,42 @@ const requestHandler = (req, res) => {
       res.writeHead(200, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' });
       res.end(JSON.stringify({ status: 'ready' })); return;
     }
+    if (pathname === '/drives') {
+      try {
+        const { execSync } = require('child_process');
+        const out = execSync('wmic logicaldisk get DeviceID,VolumeName,FreeSpace,Size /format:csv', { encoding: 'utf8', timeout: 5000 });
+        const lines = out.split('\n').filter(l => l.trim() && !l.startsWith('Node'));
+        const drives = lines.map(l => {
+          const parts = l.trim().split(',');
+          if (parts.length < 5) return null;
+          return { letter: parts[1], name: parts[2] || '', free: parseInt(parts[3]) || 0, total: parseInt(parts[4]) || 0 };
+        }).filter(Boolean);
+        res.writeHead(200, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' });
+        res.end(JSON.stringify(drives));
+      } catch(e) {
+        // fallback: try common drives
+        const drives = [];
+        for (const d of ['C','D','E','F','G']) {
+          try { if (fs.existsSync(d + ':\\')) drives.push({ letter: d + ':', name: '', free: 0, total: 0 }); } catch(e2) {}
+        }
+        res.writeHead(200, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' });
+        res.end(JSON.stringify(drives));
+      }
+      return;
+    }
+    if (pathname === '/dest-root') {
+      res.writeHead(200, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' });
+      res.end(JSON.stringify({ root: saveDir })); return;
+    }
     if (pathname === '/dir-tree') {
-      const subpath = url.searchParams.get('path') || '';
-      const fullPath = path.join(SAVE_DIR, subpath);
-      const resolved = path.resolve(fullPath);
-      if (!resolved.startsWith(path.resolve(SAVE_DIR))) {
-        res.writeHead(403); res.end('Forbidden'); return;
+      const absPath = url.searchParams.get('abs');
+      let fullPath;
+      if (absPath) {
+        fullPath = absPath.split('/').join('\\');
+        if (/^[A-Za-z]:$/.test(fullPath)) fullPath += '\\';
+      } else {
+        const subpath = url.searchParams.get('path') || '';
+        fullPath = path.join(saveDir, subpath);
       }
       try {
         const items = fs.readdirSync(fullPath, { withFileTypes: true });
@@ -1178,32 +418,119 @@ const requestHandler = (req, res) => {
       }
       return;
     }
+    if (pathname === '/source-tree') {
+      const absPath = url.searchParams.get('abs');
+      let fullPath;
+      if (absPath) {
+        fullPath = absPath.split('/').join('\\');
+        if (/^[A-Za-z]:$/.test(fullPath)) fullPath += '\\';
+      } else {
+        fullPath = saveDir;
+      }
+      try {
+        const items = fs.readdirSync(fullPath, { withFileTypes: true });
+        const dirs = items.filter(i => i.isDirectory() && !i.name.startsWith('.')).map(i => ({ name: i.name, type: 'dir' }));
+        const files = items.filter(i => i.isFile()).map(i => {
+          const stat = fs.statSync(path.join(fullPath, i.name));
+          return { name: i.name, type: 'file', size: stat.size };
+        });
+        dirs.sort(function(a, b) { return a.name.toLowerCase().localeCompare(b.name.toLowerCase()); });
+        files.sort(function(a, b) { return a.name.toLowerCase().localeCompare(b.name.toLowerCase()); });
+        res.writeHead(200, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' });
+        res.end(JSON.stringify({ path: fullPath, dirs, files }));
+      } catch(e) {
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ path: fullPath, dirs: [], files: [] }));
+      }
+      return;
+    }
+    if (pathname === '/read-server-file') {
+      const absPath = url.searchParams.get('abs');
+      if (!absPath) {
+        res.writeHead(400); res.end('Missing abs param'); return;
+      }
+      const fullPath = absPath.split('/').join('\\');
+      try {
+        const stat = fs.statSync(fullPath);
+        if (!stat.isFile()) { res.writeHead(400); res.end('Not a file'); return; }
+        res.writeHead(200, {
+          'Content-Type': 'application/octet-stream',
+          'Content-Length': stat.size,
+          'Content-Disposition': 'attachment; filename="' + path.basename(fullPath) + '"'
+        });
+        fs.createReadStream(fullPath).pipe(res);
+      } catch(e) {
+        res.writeHead(404); res.end('File not found');
+      }
+      return;
+    }
     res.writeHead(200, { 'Content-Type': 'text/html', 'Cache-Control': 'no-store, no-cache, must-revalidate', 'Pragma': 'no-cache' });
-    res.end(senderHtml); return;
+    res.end(senderHtmlFinal); return;
+  }
+
+  if (req.method === 'POST' && pathname === '/set-dest') {
+    let body = '';
+    req.on('data', c => body += c);
+    req.on('end', () => {
+      try {
+        const { root } = JSON.parse(body);
+        if (!root || typeof root !== 'string') {
+          res.writeHead(400, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ error: 'Invalid path' }));
+          return;
+        }
+        const resolved = path.resolve(root);
+        if (!fs.existsSync(resolved)) {
+          res.writeHead(400, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ error: 'Path does not exist' }));
+          return;
+        }
+        const stat = fs.statSync(resolved);
+        if (!stat.isDirectory()) {
+          res.writeHead(400, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ error: 'Not a directory' }));
+          return;
+        }
+        saveDir = resolved;
+        if (!fs.existsSync(saveDir)) fs.mkdirSync(saveDir, { recursive: true });
+        addLog('DEST CHANGED: ' + saveDir, 'info');
+        console.log('[DEST] Changed to: ' + saveDir);
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ root: saveDir }));
+      } catch(e) {
+        res.writeHead(500, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ error: e.message }));
+      }
+    });
+    return;
   }
 
   if (req.method === 'POST' && pathname === '/diff') {
     let body = '';
     req.on('data', c => body += c);
-    req.on('end', () => {
+    req.on('end', async () => {
       try {
         const files = JSON.parse(body);
         const missing = [];
-        let checked = 0, existCount = 0, missingCount = 0;
-        for (const f of files) {
-          const savePath = path.join(SAVE_DIR, f.name.replace(/\//g, '\\'));
-          checked++;
-          if (fs.existsSync(savePath)) {
-            const stat = fs.statSync(savePath);
-            if (stat.size === f.size) {
-              existCount++;
-              continue;
-            }
-          }
+        let existCount = 0, missingCount = 0;
+
+        async function checkFile(f) {
+          const savePath = path.join(saveDir, f.name.replace(/\//g, '\\'));
+          try {
+            const stat = await fs.promises.stat(savePath);
+            if (stat.size === f.size) { existCount++; return; }
+          } catch(e) {}
           missingCount++;
           missing.push(f);
         }
-        console.log('[DIFF] checked=' + checked + ' exist=' + existCount + ' missing=' + missingCount);
+
+        // Check files in batches of 200 to avoid blocking
+        for (let i = 0; i < files.length; i += 200) {
+          const batch = files.slice(i, i + 200);
+          await Promise.all(batch.map(checkFile));
+        }
+
+        console.log('[DIFF] checked=' + files.length + ' exist=' + existCount + ' missing=' + missingCount);
         addLog('DIFF: ' + existCount + ' exist, ' + missingCount + ' missing (' + fmtBytes(missing.reduce((s,f) => s + f.size, 0)) + ' to send)', 'info');
         res.writeHead(200, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' });
         res.end(JSON.stringify({ missing, existCount, missingCount, missingSize: missing.reduce((s,f) => s + f.size, 0) }));
@@ -1227,7 +554,6 @@ const requestHandler = (req, res) => {
         function checkRecursive(clientNode, serverBasePath, depth, fullPath) {
           const serverFolderPath = path.join(serverBasePath, clientNode.name);
           if (!fs.existsSync(serverFolderPath)) {
-            console.log('[FOLDER-CHECK] NOT FOUND: ' + fullPath + ' -> will create');
             return;
           }
 
@@ -1235,8 +561,6 @@ const requestHandler = (req, res) => {
           const serverCount = getFolderFileCount(serverFolderPath);
           const sizeMatch = Math.abs(serverSize - clientNode.totalSize) < 10;
           const countMatch = serverCount === clientNode.fileCount;
-
-          console.log('[FOLDER-CHECK] ' + fullPath + '/ client=' + clientNode.fileCount + 'f/' + fmtBytes(clientNode.totalSize) + ' server=' + serverCount + 'f/' + fmtBytes(serverSize) + ' sizeMatch=' + sizeMatch + ' countMatch=' + countMatch);
 
           if (sizeMatch && countMatch) {
             const indent = '  '.repeat(depth);
@@ -1257,7 +581,7 @@ const requestHandler = (req, res) => {
 
         if (tree.children) {
           for (const child of tree.children) {
-            checkRecursive(child, SAVE_DIR, 0, child.name);
+            checkRecursive(child, saveDir, 0, child.name);
           }
         }
 
@@ -1281,15 +605,13 @@ const requestHandler = (req, res) => {
   if (req.method === 'POST' && pathname === '/check') {
     let body = '';
     req.on('data', c => body += c);
-    req.on('end', () => {
+    req.on('end', async () => {
       try {
         const { name, size } = JSON.parse(body);
-        const savePath = path.join(SAVE_DIR, name.replace(/\//g, '\\'));
-        const exists = fs.existsSync(savePath);
-        if (exists) {
-          const stat = fs.statSync(savePath);
+        const savePath = path.join(saveDir, name.replace(/\//g, '\\'));
+        try {
+          const stat = await fs.promises.stat(savePath);
           const sizeMatch = stat.size === size;
-          console.log('[CHECK] ' + name + ' exists=' + exists + ' serverSize=' + stat.size + ' clientSize=' + size + ' sizeMatch=' + sizeMatch);
           if (sizeMatch) {
             stats.skipped++;
             stats.skippedBytes += size;
@@ -1297,16 +619,11 @@ const requestHandler = (req, res) => {
             res.writeHead(200, { 'Content-Type': 'application/json' });
             res.end(JSON.stringify({ exists: true }));
             return;
-          } else {
-            console.log('[CHECK] SIZE MISMATCH: ' + name + ' server=' + stat.size + ' client=' + size + ' -> will overwrite');
           }
-        } else {
-          console.log('[CHECK] NOT FOUND: ' + name + ' -> will send');
-        }
+        } catch(e) {}
         res.writeHead(200, { 'Content-Type': 'application/json' });
         res.end(JSON.stringify({ exists: false }));
       } catch(e) {
-        console.log('[CHECK] ERROR: ' + e.message);
         res.writeHead(200, { 'Content-Type': 'application/json' });
         res.end(JSON.stringify({ exists: false }));
       }
@@ -1317,17 +634,20 @@ const requestHandler = (req, res) => {
   if (req.method === 'POST' && pathname === '/upload') {
     const filename = decodeURIComponent(url.searchParams.get('name') || 'unnamed');
     const fileSize = parseInt(url.searchParams.get('size') || '0', 10);
-    const savePath = path.join(SAVE_DIR, filename.replace(/\//g, '\\'));
+    const savePath = path.join(saveDir, filename.replace(/\//g, '\\'));
     const dir = path.dirname(savePath);
 
-    console.log('[UPLOAD] Receiving: ' + filename + ' (' + fmtBytes(fileSize) + ') -> ' + savePath);
+    setImmediate(() => console.log('[UPLOAD] Receiving: ' + filename + ' (' + fmtBytes(fileSize) + ')'));
 
     if (!fs.existsSync(dir)) {
-      console.log('[UPLOAD] Creating dir: ' + dir);
       fs.mkdirSync(dir, { recursive: true });
     }
 
-    const ws = fs.createWriteStream(savePath);
+    // High performance write stream: 256KB buffer, no fsync on every write
+    const ws = fs.createWriteStream(savePath, {
+      highWaterMark: 512 * 1024,
+      flags: 'w'
+    });
     req.pipe(ws, { end: true });
 
     ws.on('finish', () => {
@@ -1335,7 +655,6 @@ const requestHandler = (req, res) => {
       stats.saved++;
       stats.savedBytes += fsize;
       addLog('SAVED: ' + filename + ' (' + fmtBytes(fsize) + ')', 'saved', fsize);
-      console.log('[UPLOAD] OK: ' + filename + ' (' + fmtBytes(fsize) + ')');
       res.writeHead(200, { 'Content-Type': 'text/plain' });
       res.end('Saved: ' + filename);
     });
@@ -1346,7 +665,6 @@ const requestHandler = (req, res) => {
       stats.failedBytes += fsize;
       failedFiles.push({ file: filename, reason: err.message });
       addLog('FAILED: ' + filename + ' - ' + err.message, 'error', fsize);
-      console.log('[UPLOAD] ERROR: ' + filename + ' - ' + err.message);
       ws.destroy(); try { fs.unlinkSync(savePath); } catch(e) {}
       if (!res.headersSent) { res.writeHead(500); res.end('Error'); }
     });
@@ -1357,7 +675,6 @@ const requestHandler = (req, res) => {
       stats.failedBytes += fsize;
       failedFiles.push({ file: filename, reason: err.message });
       addLog('WRITE ERROR: ' + filename + ' - ' + err.message, 'error', fsize);
-      console.log('[UPLOAD] WRITE ERROR: ' + filename + ' - ' + err.message);
       try { fs.unlinkSync(savePath); } catch(e) {}
       if (!res.headersSent) { res.writeHead(500); res.end('Write error'); }
     });
@@ -1374,7 +691,7 @@ const httpServer = http.createServer(requestHandler);
 function validateBrowserJS() {
   const vm = require('vm');
   const pages = [
-    { name: 'senderHtml', html: senderHtml },
+    { name: 'senderHtml', html: senderHtmlFinal },
     { name: 'statusHtml', html: statusHtml }
   ];
   for (const page of pages) {
@@ -1385,6 +702,8 @@ function validateBrowserJS() {
       process.exit(1);
     }
     const js = page.html.substring(s, e);
+
+    // Syntax check
     try {
       new vm.Script(js);
       console.log('[VALIDATE] ' + page.name + ' browser JS OK (' + js.split('\n').length + ' lines)');
@@ -1400,6 +719,14 @@ function validateBrowserJS() {
       console.error('='.repeat(55));
       process.exit(1);
     }
+
+    // Check getElementById IDs exist in HTML
+    const ids = [...js.matchAll(/getElementById\(['"](\w+)['"]\)/g)].map(m => m[1]);
+    const dynamicIds = ['pickerHint'];
+    const missing = ids.filter(id => !page.html.includes('id="' + id + '"') && !dynamicIds.includes(id));
+    if (missing.length > 0) {
+      console.error('[VALIDATE] WARNING: ' + page.name + ' has getElementById for missing IDs: ' + missing.join(', '));
+    }
   }
 }
 
@@ -1409,15 +736,29 @@ validateBrowserJS();
   const tlsOptions = await getTlsOptions();
   const httpsServer = https.createServer(tlsOptions, requestHandler);
 
+  // TCP optimizations for high throughput
+  httpsServer.keepAliveTimeout = 60000;
+  httpsServer.on('connection', (socket) => {
+    socket.setNoDelay(true);           // Disable Nagle's algorithm
+    socket.setKeepAlive(true, 60000);  // Keep connections alive
+  });
+
   httpsServer.listen(HTTPS_PORT, '0.0.0.0', () => {
     console.log('='.repeat(55));
     console.log('HTTPS (use this): https://' + HOST_IP + ':' + HTTPS_PORT);
     console.log('HTTP  (fallback): http://'  + HOST_IP + ':' + HTTP_PORT);
     console.log('STATUS: https://' + HOST_IP + ':' + HTTPS_PORT + '/status');
-    console.log('SAVES TO: ' + SAVE_DIR);
+    console.log('SAVES TO: ' + saveDir);
     console.log('NOTE: Accept the certificate warning on first open');
     console.log('='.repeat(55));
     addLog('Server started (HTTPS:' + HTTPS_PORT + ' HTTP:' + HTTP_PORT + ')', 'info');
+  });
+
+  // TCP optimizations for HTTP too
+  httpServer.keepAliveTimeout = 60000;
+  httpServer.on('connection', (socket) => {
+    socket.setNoDelay(true);
+    socket.setKeepAlive(true, 60000);
   });
 
   httpServer.listen(HTTP_PORT, '0.0.0.0', () => {

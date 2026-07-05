@@ -1,4 +1,8 @@
 {
+  "scripts": {
+    "test": "node --check server.js && node --check client.js && node --test test.js",
+    "start": "node server.js"
+  },
   "dependencies": {
     "selfsigned": "^5.5.0"
   }
