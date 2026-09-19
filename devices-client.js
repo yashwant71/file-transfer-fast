@@ -302,16 +302,18 @@ function renderHistory() {
       : escHtml((e.names || [])[0] || 'files');
     var sizeTxt = fmtGB(e.size) + ' · ' + e.count + (e.count === 1 ? ' file' : ' files');
     // Row 2: speed-or-state … peer + folder path.
-    var arrow = e.dir === 'up' ? '→' : '←';
+    var arrow = e.dir === 'up' ? '↑' : '↓';
     var dest = arrow + ' ' + e.peer + (e.path ? ' · ' + e.path : '');
+    var arrowWhite = '<span style="color:#fff;font-weight:800;font-size:18px">' + escHtml(arrow) + '</span>';
+    var destHtml = arrowWhite + ' ' + escHtml(e.peer) + (e.path ? ' <span style="color:#888">·</span> ' + escHtml(e.path) : '');
     var html =
-      '<div class="l1"' + (canReveal ? ' data-reveal="' + escHtml(e.transferId) + '" data-name="' + escHtml((e.names||[])[0]||e.files&&e.files[0]&&e.files[0].name||'') + '" style="cursor:pointer" title="Show in folder"' : '') + '><span class="dir">' + (e.dir === 'up' ? 'UP' : 'DOWN') + '</span>' +
+      '<div class="l1"' + (canReveal ? ' data-reveal="' + escHtml(e.transferId) + '" data-name="' + escHtml((e.names||[])[0]||e.files&&e.files[0]&&e.files[0].name||'') + '" style="cursor:pointer" title="Show in folder"' : '') + '><span class="dir" title="' + (e.dir==='up'?'Upload':'Download') + '">' + (e.dir === 'up' ? '↑' : '↓') + '</span>' +
       '<span class="nm">' + title + '</span>' +
       '<span class="sz">' + sizeTxt + '</span></div>' +
       '<div class="l2"><span class="sp">' + escHtml(statusLabel(e)) + '</span>' +
       (e.path
-        ? '<span class="pp"' + (canReveal ? ' data-reveal="' + escHtml(e.transferId) + '" data-name="' + escHtml((e.names||[])[0]||e.files&&e.files[0]&&e.files[0].name||'') + '" style="cursor:pointer;text-decoration:underline" title="Show in folder"' : ' data-copy="' + escHtml(e.path) + '" title="tap to copy"') + '>' + escHtml(dest) + '</span>'
-        : '<span class="pp">' + escHtml(arrow + ' ' + e.peer) + '</span>') +
+        ? '<span class="pp"' + (canReveal ? ' data-reveal="' + escHtml(e.transferId) + '" data-name="' + escHtml((e.names||[])[0]||e.files&&e.files[0]&&e.files[0].name||'') + '" style="cursor:pointer;text-decoration:underline" title="Show in folder"' : ' data-copy="' + escHtml(e.path) + '" title="tap to copy"') + '>' + destHtml + '</span>'
+        : '<span class="pp">' + destHtml + '</span>') +
       '</div>';
     if (active) {
       var pct = e.size > 0 ? Math.round((Math.min(e.live, e.size) / e.size) * 100) : 0;
@@ -383,29 +385,8 @@ function copyText(s) {
     prompt('Copy path:', s);
   }
 }
-// Background write into the picked folder (fire-and-forget from the poll loop).
-async function saveToPhoneDirAsync(entry) {
-  entry.status = 'receiving';
-  entry.live = 0;
-  renderHistory();
-  var ok = await saveToPhoneDir(entry);
-  if (ok) {
-    entry.status = 'ready';
-    entry.live = entry.size;
-    entry.savedToFolder = (phoneDirHandle && phoneDirHandle.name) || 'picked folder';
-    entry.path = 'Folder: ' + entry.savedToFolder;
-  } else {
-    // Permission lost or write failed — fall back to manual/auto download.
-    entry.status = 'ready';
-    entry.live = entry.size;
-    if (phoneAuto) {
-      entry.savedToDownloads = true;
-      renderHistory();
-      downloadAll(entry.transferId);
-    }
-  }
-  renderHistory();
-}
+// Background write — now incremental via queuePhoneDownloads
+async function saveToPhoneDirAsync(entry) { queuePhoneDownloads(entry, entry.files||[]); }
 async function ackTransfer(transferId, action) {
   // Accept tap is a user gesture: use it to (re-)grant folder permission.
   if (action === 'accept' && FS_DIR && phoneDirHandle) {
@@ -453,6 +434,7 @@ async function startSend() {
     var l = normalizePath(f.name).toLowerCase();
     return l.indexOf('.git/') === -1 && l !== '.git';
   });
+  list.sort(function(a,b){ return a.size - b.size; });
   if (!list.length) return;
   transferActive = true;
   transferAbort = new AbortController();
@@ -508,21 +490,94 @@ async function startSend() {
       fin._t = setInterval(function() { if (idx >= list.length && active === 0) fin(); }, 100);
       next();
     });
+    const CHUNK_SIZE = 8 * 1024 * 1024;
+    const CHUNK_THRESHOLD = 16 * 1024 * 1024;
     async function one(item) {
       if (!transferActive) return;
-      try {
-        var url = '/upload?name=' + encodeURIComponent(item.name) + '&size=' + item.size +
-          (entry.transferId ? '&transferId=' + encodeURIComponent(entry.transferId) : '');
-        await uploadFileXHR(url, item._file, function(ld) { item._loaded = ld; });
-        item._loaded = 0; completed++; sentBytes += item.size;
-        entry.live = Math.min(sentBytes, bytesTotal);
-        tick();
-      } catch(err) {
-        item._loaded = 0;
-        if (err.name === 'AbortError') { transferActive = false; throw err; }
-        completed++; sentBytes += item.size;
-        entry._failed = (entry._failed || 0) + 1;
-        tick();
+      // Large single file: split into 8MB chunks, 4 parallel (biggest win for 300MB)
+      if (item._file.size > CHUNK_THRESHOLD) {
+        const totalChunks = Math.ceil(item._file.size / CHUNK_SIZE);
+        let chunkLoaded = new Array(totalChunks).fill(0);
+        const updateLoaded = () => { item._loaded = chunkLoaded.reduce((a,b)=>a+b, 0); };
+        let nextIdx = 0;
+        let active = 0;
+        const MAX_PAR = 4;
+        try {
+          await new Promise((resolve, reject) => {
+            let done = 0;
+            let failedErr = null;
+            function launch() {
+              if (failedErr) return;
+              while (active < MAX_PAR && nextIdx < totalChunks && !failedErr) {
+                const ci = nextIdx++;
+                const start = ci * CHUNK_SIZE;
+                const end = Math.min(start + CHUNK_SIZE, item._file.size);
+                const slice = item._file.slice(start, end);
+                active++;
+                (async () => {
+                  for (let ca=0; ca<2; ca++) {
+                    if (!transferActive) { failedErr = new Error('Aborted'); failedErr.name='AbortError'; reject(failedErr); return; }
+                    try {
+                      const curl = '/upload?name=' + encodeURIComponent(item.name) + '&size=' + item.size + (entry.transferId ? '&transferId=' + encodeURIComponent(entry.transferId) : '') + '&chunkIndex=' + ci + '&totalChunks=' + totalChunks;
+                      await uploadFileXHR(curl, slice, (ld) => { chunkLoaded[ci]=ld; updateLoaded(); });
+                      break;
+                    } catch(e) {
+                      if (e.name==='AbortError') { failedErr=e; reject(e); return; }
+                      const retriable = (e.message==='Network error' || e.name==='TypeError' || /Network/.test(e.message) || e.status>=500);
+                      if (retriable && ca===0) { await new Promise(r=>setTimeout(r,700)); continue; }
+                      failedErr=e; reject(e); return;
+                    }
+                  }
+                  // mark this chunk as fully uploaded for progress
+                  const isLast = ci===totalChunks-1;
+                  const expected = isLast ? (item._file.size - ci*CHUNK_SIZE) : CHUNK_SIZE;
+                  chunkLoaded[ci]=expected;
+                  updateLoaded();
+                  active--;
+                  done++;
+                  if (done===totalChunks) resolve();
+                  else launch();
+                })();
+              }
+            }
+            launch();
+          });
+          item._loaded = 0; completed++; sentBytes += item.size;
+          entry.live = Math.min(sentBytes, bytesTotal);
+          tick();
+          return;
+        } catch(err) {
+          item._loaded = 0;
+          if (err.name==='AbortError') { transferActive=false; throw err; }
+          completed++; sentBytes += item.size;
+          entry._failed = (entry._failed||0)+1;
+          tick();
+          return;
+        }
+      }
+      for (let attempt = 0; attempt < 2; attempt++) {
+        if (!transferActive) return;
+        try {
+          var url = '/upload?name=' + encodeURIComponent(item.name) + '&size=' + item.size +
+            (entry.transferId ? '&transferId=' + encodeURIComponent(entry.transferId) : '');
+          await uploadFileXHR(url, item._file, function(ld) { item._loaded = ld; });
+          item._loaded = 0; completed++; sentBytes += item.size;
+          entry.live = Math.min(sentBytes, bytesTotal);
+          tick();
+          return;
+        } catch(err) {
+          item._loaded = 0;
+          if (err.name === 'AbortError') { transferActive = false; throw err; }
+          const retriable = (err.message === 'Network error' || err.name === 'TypeError' || /Network/.test(err.message) || err.status >= 500);
+          if (retriable && attempt === 0) {
+            await new Promise(r => setTimeout(r, 700));
+            continue;
+          }
+          completed++; sentBytes += item.size;
+          entry._failed = (entry._failed || 0) + 1;
+          tick();
+          return;
+        }
       }
     }
   }
@@ -614,11 +669,7 @@ async function pollIncoming() {
         e.status = 'ready';
         e.live = e.size;
         e.path = saveDisplay();
-        if (!isHostDevice && !e._autoDone && !e.savedToFolder && !e.savedToDownloads) {
-          e._autoDone = true;
-          if (phoneDirHandle) saveToPhoneDirAsync(e);
-          else if (phoneAuto) { e.savedToDownloads = true; renderHistory(); downloadAll(e.transferId); }
-        }
+        if (!isHostDevice) queuePhoneDownloads(e, e.files || []);
       } else if (t.status === 'accepted') {
         if (e.status !== 'receiving') { e.status = 'receiving'; e._t0 = e._t0 || Date.now(); }
         try {
@@ -642,15 +693,15 @@ async function pollIncoming() {
               e.live = e.size;
               e.speed = 0;
               e.path = saveDisplay();
+              // Incremental: start each file as it lands (overlap upload+download)
+              if (!isHostDevice && d.uploadedFiles && d.uploadedFiles.length) {
+                queuePhoneDownloads(e, d.uploadedFiles);
+              }
               if (d.status === 'ready' && !isHostDevice && !e._autoDone) {
                 e._autoDone = true;
-                if (phoneDirHandle) {
-                  saveToPhoneDirAsync(e);
-                } else if (phoneAuto) {
-                  e.savedToDownloads = true;
-                  renderHistory();
-                  downloadAll(e.transferId);
-                }
+                if (d.uploadedFiles && d.uploadedFiles.length) queuePhoneDownloads(e, d.uploadedFiles);
+                else if (phoneDirHandle) queuePhoneDownloads(e, e.files || []);
+                else if (phoneAuto) { e.savedToDownloads = true; renderHistory(); }
               }
             }
           }
@@ -775,33 +826,87 @@ async function loadPhoneDir() {
     }
   } catch(e) {}
 }
-// Write a ready transfer straight into the picked folder (recreating subfolders).
-async function saveToPhoneDir(entry) {
-  var dir = phoneDirHandle;
-  if (!dir) return false;
-  try {
-    var perm = await dir.queryPermission({ mode: 'readwrite' });
-    if (perm !== 'granted') return false;
-  } catch(e) { return false; }
-  try {
-    for (var i = 0; i < (entry.files || []).length; i++) {
-      var f = entry.files[i];
-      var u = '/download-transfer-file?transferId=' + encodeURIComponent(entry.transferId) + '&name=' + encodeURIComponent(f.name);
-      var r = await fetch(u);
-      if (!r.ok) throw new Error('fetch failed');
-      var blob = await r.blob();
-      var parts = String(f.name).split('/').filter(Boolean);
-      var d = dir;
-      for (var p = 0; p < parts.length - 1; p++) d = await d.getDirectoryHandle(parts[p], { create: true });
-      var fh = await d.getFileHandle(parts[parts.length - 1] || 'file', { create: true });
-      var w = await fh.createWritable();
-      await w.write(blob);
-      await w.close();
-      entry.live = Math.min(entry.live + (f.size || 0), entry.size);
-      renderHistory();
+// Parallel streaming save into picked folder (or Downloads fallback) — per-file as it lands
+async function saveSingleFile(dirHandle, transferId, file) {
+  for (let attempt=0; attempt<2; attempt++) {
+    try {
+      if (dirHandle) {
+        try { const perm = await dirHandle.queryPermission({mode:'readwrite'}); if (perm!=='granted') throw new Error('no perm'); } catch(e){ throw e; }
+      }
+      const url = '/download-transfer-file?transferId=' + encodeURIComponent(transferId) + '&name=' + encodeURIComponent(file.name);
+      const resp = await fetch(url);
+      if (!resp.ok) throw new Error('fetch '+resp.status);
+      if (dirHandle) {
+        const parts = String(file.name).split('/').filter(Boolean);
+        let d = dirHandle;
+        for (let i=0;i<parts.length-1;i++) d = await d.getDirectoryHandle(parts[i], {create:true});
+        const fh = await d.getFileHandle(parts[parts.length-1]||'file', {create:true});
+        const writable = await fh.createWritable();
+        if (resp.body && typeof resp.body.pipeTo === 'function') {
+          await resp.body.pipeTo(writable);
+        } else {
+          const blob = await resp.blob();
+          await writable.write(blob);
+          await writable.close();
+        }
+        return true;
+      } else {
+        const a = document.createElement('a');
+        a.href = url;
+        a.download = file.name.split('/').pop() || 'file';
+        document.body.appendChild(a);
+        a.click();
+        document.body.removeChild(a);
+        await new Promise(r=>setTimeout(r, 400));
+        return true;
+      }
+    } catch(e) {
+      if (attempt===0) { await new Promise(r=>setTimeout(r,700)); continue; }
+      return false;
     }
-    return true;
-  } catch(e) { return false; }
+  }
+  return false;
+}
+function queuePhoneDownloads(entry, uploadedFiles) {
+  if (isHostDevice) return;
+  if (!uploadedFiles || !uploadedFiles.length) return;
+  if (!entry._downloaded) entry._downloaded = new Set();
+  if (!entry._downloading) entry._downloading = new Set();
+  if (!entry._queue) entry._queue = [];
+  if (entry._active == null) entry._active = 0;
+  const MAX_PAR = 3;
+  for (const f of uploadedFiles) {
+    if (!entry._downloaded.has(f.name) && !entry._downloading.has(f.name) && !entry._queue.some(x=>x.name===f.name)) {
+      entry._queue.push(f);
+    }
+  }
+  while (entry._active < MAX_PAR && entry._queue.length) {
+    const file = entry._queue.shift();
+    entry._downloading.add(file.name);
+    entry._active++;
+    (async () => {
+      const ok = await saveSingleFile(phoneDirHandle, entry.transferId, file);
+      entry._downloading.delete(file.name);
+      entry._active--;
+      if (ok) {
+        entry._downloaded.add(file.name);
+        if (entry._downloaded.size >= entry.count) {
+          entry.savedToFolder = phoneDirHandle ? (phoneDirHandle.name||'picked folder') : null;
+          entry.savedToDownloads = !phoneDirHandle && phoneAuto ? true : entry.savedToDownloads;
+        }
+        renderHistory();
+      } else {
+        if (!file._retried) { file._retried=true; entry._queue.push(file); }
+      }
+      if (entry._queue.length) queuePhoneDownloads(entry, []);
+    })();
+  }
+}
+// Legacy wrapper kept for compatibility (now parallel)
+async function saveToPhoneDir(entry) {
+  if (!phoneDirHandle) return false;
+  queuePhoneDownloads(entry, entry.files || []);
+  return true;
 }
 if (sbCancelBtn) sbCancelBtn.addEventListener('click', function() { saveBrowser.style.display = 'none'; });
 async function sbDrives() {

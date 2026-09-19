@@ -499,7 +499,7 @@ const devicesHtml = `<!DOCTYPE html>
     #sbBar { display: flex; gap: 8px; padding: 8px; }
     .h { padding: 8px 0; border-bottom: 1px solid #222; }
     .h .l1 { display: flex; gap: 8px; align-items: baseline; }
-    .dir { font-weight: 700; font-size: 12px; border: 1px solid #444; border-radius: 3px; padding: 0 5px; white-space: nowrap; }
+    .dir { font-size: 20px; font-weight: 800; color: #fff; width: 24px; text-align: center; line-height: 1; background: #333; border-radius: 4px; display: inline-flex; align-items: center; justify-content: center; }
     .h .nm { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-weight: 600; }
     .h .sz { font-size: 12px; color: #888; white-space: nowrap; }
     .h .l2 { display: flex; justify-content: space-between; gap: 8px; margin-top: 2px; }
@@ -1150,6 +1150,135 @@ const requestHandler = (req, res) => {
     const targetDev = foundTransfer ? devices.get(foundTransfer.targetDeviceId) : null;
     const isSendingToRemote = foundTransfer && targetDev && !targetDev.isHost;
 
+    // Safety: limit filename length and reject path traversal
+    if (filename.length > 500 || filename.includes('..')) {
+      res.writeHead(400); res.end('Invalid name'); return;
+    }
+
+    // Count body bytes for live progress (both chunked and single)
+    if (foundTransfer) {
+      if (typeof foundTransfer.receivedBytes !== 'number') foundTransfer.receivedBytes = 0;
+      req.on('data', (chunk) => { foundTransfer.receivedBytes += chunk.length; });
+    }
+
+    // --- Chunked upload for large single files (>16MB split into 8MB) ---
+    const chunkIndexRaw = url.searchParams.get('chunkIndex');
+    const totalChunksRaw = url.searchParams.get('totalChunks');
+    const isChunked = chunkIndexRaw !== null && totalChunksRaw !== null;
+    if (isChunked) {
+      const chunkIndex = parseInt(chunkIndexRaw, 10);
+      const totalChunks = parseInt(totalChunksRaw, 10);
+      if (Number.isNaN(chunkIndex) || Number.isNaN(totalChunks) || chunkIndex < 0 || chunkIndex >= totalChunks || totalChunks > 500 || totalChunks < 2) {
+        res.writeHead(400); res.end('Invalid chunk'); return;
+      }
+      // Allow chunked without transferId (quick upload) — use filename as key
+      const effectiveId = String(transferId || ('quick_' + Buffer.from(filename).toString('base64url').slice(0,12)));
+      if (!foundTransfer && transferId) { res.writeHead(404); res.end('Transfer not found'); return; }
+      // Use temp chunks dir under os.tmpdir (safer than TRANSFERS_DIR for partials)
+      const chunksBase = path.join(os.tmpdir(), 'ft-chunks', effectiveId);
+      try { if (!fs.existsSync(chunksBase)) fs.mkdirSync(chunksBase, { recursive: true }); } catch(e) {}
+      const safeKey = Buffer.from(filename).toString('base64url');
+      const chunkPath = path.join(chunksBase, safeKey + '.' + chunkIndex + '.part');
+      let chunkDone = false;
+      let chunkFailed = false;
+      const cws = fs.createWriteStream(chunkPath, { flags: 'w', highWaterMark: 512*1024 });
+      function failChunk(code, msg) {
+        if (chunkFailed || chunkDone) return;
+        chunkFailed = true;
+        try { cws.destroy(); } catch(e) {}
+        try { fs.unlinkSync(chunkPath); } catch(e) {}
+        if (!res.headersSent) { res.writeHead(code); res.end(msg); }
+      }
+      cws.on('error', (e) => failChunk(500, 'Chunk write error'));
+      req.on('error', (e) => failChunk(500, 'Chunk req error'));
+      req.on('aborted', () => failChunk(499, 'Aborted'));
+      req.pipe(cws);
+      cws.on('finish', async () => {
+        if (chunkFailed) return;
+        chunkDone = true;
+        // Check if all chunks for this file are present
+        let allPresent = true;
+        for (let i = 0; i < totalChunks; i++) {
+          if (!fs.existsSync(path.join(chunksBase, safeKey + '.' + i + '.part'))) { allPresent = false; break; }
+        }
+        if (!allPresent) {
+          if (!res.headersSent) { res.writeHead(200); res.end('Chunk ' + chunkIndex + ' ok'); }
+          return;
+        }
+        // Prevent double assembly when last chunks finish concurrently
+        if (!foundTransfer._assembling) foundTransfer._assembling = new Set();
+        if (foundTransfer._assembling.has(safeKey)) {
+          if (!res.headersSent) { res.writeHead(200); res.end('Chunk ' + chunkIndex + ' ok (already assembling)'); }
+          return;
+        }
+        foundTransfer._assembling.add(safeKey);
+        // All chunks present — assemble into final destination
+        let finalPath;
+        if (isSendingToRemote) {
+          const transferDir = path.join(TRANSFERS_DIR, transferId);
+          try { if (!fs.existsSync(transferDir)) fs.mkdirSync(transferDir, { recursive: true }); } catch(e) {}
+          finalPath = path.join(transferDir, path.basename(filename));
+        } else {
+          finalPath = path.join(saveDir, filename.replace(/\//g, '\\'));
+          const dir = path.dirname(finalPath);
+          try { if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true }); } catch(e) {}
+        }
+        try {
+          // Assemble atomically: write to temp then rename
+          const tmpFinal = finalPath + '.assembling';
+          const out = fs.createWriteStream(tmpFinal, { flags: 'w', highWaterMark: 1024*1024 });
+          for (let i = 0; i < totalChunks; i++) {
+            const part = path.join(chunksBase, safeKey + '.' + i + '.part');
+            await new Promise((res2, rej2) => {
+              const inp = fs.createReadStream(part, { highWaterMark: 1024*1024 });
+              inp.on('error', rej2);
+              inp.pipe(out, { end: false });
+              inp.on('end', res2);
+            });
+          }
+          await new Promise(res2 => out.end(res2));
+          // Verify size (allow small drift)
+          try {
+            const st = fs.statSync(tmpFinal);
+            if (Math.abs(st.size - fileSize) > 1024 && fileSize > 0) {
+              // size mismatch — still keep but log
+              console.log('[CHUNK] size mismatch for ' + filename + ': got ' + st.size + ' expect ' + fileSize);
+            }
+          } catch(e) {}
+          try { if (fs.existsSync(finalPath)) fs.unlinkSync(finalPath); } catch(e) {}
+          fs.renameSync(tmpFinal, finalPath);
+          // Cleanup chunks for this file
+          for (let i = 0; i < totalChunks; i++) { try { fs.unlinkSync(path.join(chunksBase, safeKey + '.' + i + '.part')); } catch(e) {} }
+          try { if (fs.readdirSync(chunksBase).length === 0) fs.rmdirSync(chunksBase); } catch(e) {}
+          try { const p2 = path.join(os.tmpdir(), 'ft-chunks', effectiveId); if (fs.existsSync(p2) && fs.readdirSync(p2).length === 0) fs.rmdirSync(p2); } catch(e) {}
+          // Mark transfer progress as complete for this file
+          if (!isSendingToRemote) { stats.saved++; stats.savedBytes += fileSize; addLog('SAVED: ' + filename + ' (' + fmtBytes(fileSize) + ')', 'saved', fileSize); }
+          if (foundTransfer) {
+            if (!foundTransfer.uploadedFiles) foundTransfer.uploadedFiles = [];
+            const at = foundTransfer.uploadedFiles.findIndex(x => x.name === filename);
+            if (at >= 0) foundTransfer.uploadedFiles[at] = { name: filename, size: fileSize };
+            else foundTransfer.uploadedFiles.push({ name: filename, size: fileSize });
+            const uniq = new Set(foundTransfer.uploadedFiles.map(x => x.name)).size;
+            const needed = (foundTransfer.files || []).length;
+            if (uniq >= needed) {
+              foundTransfer.receivedBytes = (foundTransfer.files || []).reduce((s,f)=>s+(f.size||0),0);
+              foundTransfer.status = isSendingToRemote ? 'ready' : 'completed';
+              foundTransfer.completedAt = Date.now();
+              addLog('Transfer ' + (isSendingToRemote ? 'ready for download' : 'completed') + ': ' + uniq + '/' + needed + ' files', 'info');
+            }
+          }
+          try { if (foundTransfer._assembling) foundTransfer._assembling.delete(safeKey); } catch(e) {}
+          if (!res.headersSent) { res.writeHead(200); res.end('Saved: ' + filename); }
+        } catch(e) {
+          try { if (foundTransfer._assembling) foundTransfer._assembling.delete(safeKey); } catch(e2) {}
+          try { fs.unlinkSync(finalPath + '.assembling'); } catch(e2) {}
+          if (!res.headersSent) { res.writeHead(500); res.end('Assemble error: ' + e.message); }
+        }
+      });
+      return;
+    }
+
+    // --- Single (non-chunked) upload ---
     let savePath;
     if (isSendingToRemote) {
       const transferDir = path.join(TRANSFERS_DIR, transferId);
@@ -1168,14 +1297,21 @@ const requestHandler = (req, res) => {
       highWaterMark: 512 * 1024,
       flags: 'w'
     });
-    // Count body bytes per transfer so receivers can show live progress/speed.
-    if (foundTransfer) {
-      if (typeof foundTransfer.receivedBytes !== 'number') foundTransfer.receivedBytes = 0;
-      req.on('data', (chunk) => { foundTransfer.receivedBytes += chunk.length; });
+    let uploadDone = false;
+    let uploadFailed = false;
+    function failOnce(fsize, reason, code) {
+      if (uploadFailed) return;
+      uploadFailed = true;
+      stats.failed++;
+      stats.failedBytes += fsize;
+      failedFiles.push({ file: filename, reason });
+      addLog('FAILED: ' + filename + ' - ' + reason, 'error', fsize);
+      try { ws.destroy(); } catch(e) {}
+      try { fs.unlinkSync(savePath); } catch(e) {}
+      if (!res.headersSent) { res.writeHead(code || 500); res.end(reason); }
     }
-    req.pipe(ws, { end: true });
-
     ws.on('finish', () => {
+      uploadDone = true;
       const fsize = parseInt(url.searchParams.get('size') || '0', 10);
       if (!isSendingToRemote) {
         stats.saved++;
@@ -1184,38 +1320,65 @@ const requestHandler = (req, res) => {
       }
       if (foundTransfer) {
         if (!foundTransfer.uploadedFiles) foundTransfer.uploadedFiles = [];
-        foundTransfer.uploadedFiles.push({ name: filename, size: fsize });
-        if (foundTransfer.uploadedFiles.length >= (foundTransfer.files?.length || 0)) {
+        // Dedupe by name so a client retry does not create a duplicate entry
+        // and fire the length >= files.length check too early.
+        const at = foundTransfer.uploadedFiles.findIndex(x => x.name === filename);
+        if (at >= 0) foundTransfer.uploadedFiles[at] = { name: filename, size: fsize };
+        else foundTransfer.uploadedFiles.push({ name: filename, size: fsize });
+        // Use unique-name count for completion (retry of same file should not advance it)
+        const uniq = new Set(foundTransfer.uploadedFiles.map(x => x.name)).size;
+        const needed = (foundTransfer.files || []).length;
+        if (uniq >= needed) {
           // Ensure 100% on completion even if chunk counting drifted
           foundTransfer.receivedBytes = (foundTransfer.files || []).reduce((s,f)=>s+(f.size||0), 0);
           foundTransfer.status = isSendingToRemote ? 'ready' : 'completed';
           foundTransfer.completedAt = Date.now();
-          addLog('Transfer ' + (isSendingToRemote ? 'ready for download' : 'completed') + ': ' + foundTransfer.uploadedFiles.length + ' files', 'info');
+          addLog('Transfer ' + (isSendingToRemote ? 'ready for download' : 'completed') + ': ' + uniq + '/' + needed + ' files', 'info');
         }
       }
-      res.writeHead(200, { 'Content-Type': 'text/plain' });
-      res.end('Saved: ' + filename);
+      if (!res.headersSent) { res.writeHead(200, { 'Content-Type': 'text/plain' }); res.end('Saved: ' + filename); }
     });
 
     req.on('error', (err) => {
+      if (uploadDone || uploadFailed) return;
       const fsize = parseInt(url.searchParams.get('size') || '0', 10);
-      stats.failed++;
-      stats.failedBytes += fsize;
-      failedFiles.push({ file: filename, reason: err.message });
-      addLog('FAILED: ' + filename + ' - ' + err.message, 'error', fsize);
-      ws.destroy(); try { fs.unlinkSync(savePath); } catch(e) {}
-      if (!res.headersSent) { res.writeHead(500); res.end('Error'); }
+      failOnce(fsize, err.message, 500);
     });
 
     ws.on('error', (err) => {
+      if (uploadDone || uploadFailed) return;
       const fsize = parseInt(url.searchParams.get('size') || '0', 10);
-      stats.failed++;
-      stats.failedBytes += fsize;
-      failedFiles.push({ file: filename, reason: err.message });
-      addLog('WRITE ERROR: ' + filename + ' - ' + err.message, 'error', fsize);
-      try { fs.unlinkSync(savePath); } catch(e) {}
-      if (!res.headersSent) { res.writeHead(500); res.end('Write error'); }
+      failOnce(fsize, 'WRITE ERROR: ' + err.message, 500);
     });
+
+    // Aborted: clean partial file. 'close' is too noisy (fires on normal success before ws finish),
+    // so we only handle 'aborted' explicitly and let the 400ms delayed check handle true drops.
+    req.on('aborted', () => {
+      if (uploadDone || uploadFailed) return;
+      uploadFailed = true;
+      try { ws.destroy(); } catch(e) {}
+      try { fs.unlinkSync(savePath); } catch(e) {}
+      if (!res.headersSent) { try { res.writeHead(499); res.end('Client aborted'); } catch(e) {} }
+    });
+    req.on('close', () => {
+      if (uploadDone || uploadFailed) return;
+      setTimeout(() => {
+        if (uploadDone || uploadFailed) return;
+        if (res.writableEnded || res.headersSent) return;
+        try {
+          if (fs.existsSync(savePath)) {
+            const st = fs.statSync(savePath);
+            const expect = parseInt(url.searchParams.get('size') || '0', 10);
+            if (expect > 0 && st.size < expect) {
+              try { ws.destroy(); } catch(e) {}
+              try { fs.unlinkSync(savePath); } catch(e) {}
+              if (!res.headersSent) { try { res.writeHead(499); res.end('Closed'); } catch(e) {} }
+            }
+          }
+        } catch(e) {}
+      }, 400);
+    });
+    req.pipe(ws, { end: true });
 
     return;
   }
