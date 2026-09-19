@@ -54,7 +54,7 @@ Edit the top of `server.js`:
 | `HTTP_PORT` | `8001` | HTTP fallback port |
 | `HTTPS_PORT` | `8443` | HTTPS port (recommended) |
 | `HOST_IP` | `192.168.137.1` | Server bind IP / certificate CN |
-| `saveDir` | `D:\art` | Initial save directory (changeable at runtime) |
+| `saveDir` | `~/File Transfer` | Initial save directory (changeable at runtime) |
 
 ## File Structure
 

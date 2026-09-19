@@ -97,7 +97,7 @@ describe('Static validation', () => {
 
     const clientJs = fs.readFileSync(CLIENT_FILE, 'utf8');
     const ids = [...clientJs.matchAll(/getElementById\(['"](\w+)['"]\)/g)].map(m => m[1]);
-    const dynamicIds = ['pickerHint'];
+    const dynamicIds = ['pickerHint', 'clearSel'];
     const missing = ids.filter(id => !html.includes('id="' + id + '"') && !dynamicIds.includes(id));
     assert.deepEqual(missing, [], `Missing element IDs: ${missing.join(', ')}`);
   });
@@ -174,12 +174,14 @@ describe('E2E tests', () => {
     const origRes = await fetchPage(SERVER_URL + '/dest-root');
     const origRoot = JSON.parse(origRes.body).root;
 
-    const setRes = await postJSON(SERVER_URL + '/set-dest', { root: 'D:\\art' });
+    const tmpRoot = fs.mkdtempSync(path.join(require('os').tmpdir(), 'ft-test-'));
+    const setRes = await postJSON(SERVER_URL + '/set-dest', { root: tmpRoot });
     assert.equal(setRes.status, 200);
     assert.ok(setRes.body.root, 'Missing root in response');
 
     // Restore
     await postJSON(SERVER_URL + '/set-dest', { root: origRoot });
+    try { fs.rmdirSync(tmpRoot); } catch(e) {}
   });
 
   it('GET /dir-tree returns subdirectories', async () => {
@@ -204,8 +206,9 @@ describe('E2E tests', () => {
     assert.equal(uploadRes.status, 200);
     assert.ok(uploadRes.body.includes('Saved:'), 'Expected Saved response, got: ' + uploadRes.body);
 
-    // Clean up if file exists (server may save to saveDir)
-    const targetPath = path.join('D:\\art', filename);
+    // Clean up if file exists (server saves to its current saveDir)
+    const rootRes = await fetchPage(SERVER_URL + '/dest-root');
+    const targetPath = path.join(JSON.parse(rootRes.body).root, filename);
     try { fs.unlinkSync(targetPath); } catch(e) {}
   });
 
@@ -213,5 +216,82 @@ describe('E2E tests', () => {
     const res = await postJSON(SERVER_URL + '/check-folder', { path: '' });
     assert.equal(res.status, 200);
     assert.ok(typeof res.body === 'object', 'Not an object');
+  });
+
+  it('GET /devices-ui returns connected devices page', async () => {
+    const res = await fetchPage(SERVER_URL + '/devices-ui');
+    assert.equal(res.status, 200);
+    assert.ok(res.body.includes('File Share'), 'Missing File Share title');
+    assert.ok(res.body.includes('deviceList'), 'Missing deviceList container');
+    assert.ok(res.body.includes('histList'), 'Missing histList container');
+  });
+
+  it('Device flow: register, heartbeat, send, ack, unregister', async () => {
+    // 1. Register Device A (PC)
+    const regA = await postJSON(SERVER_URL + '/register', {
+      id: 'test_dev_pc',
+      name: 'Test PC',
+      userAgent: 'Windows'
+    });
+    assert.equal(regA.status, 200);
+    assert.equal(regA.body.id, 'test_dev_pc');
+    assert.ok(Array.isArray(regA.body.devices));
+
+    // 2. Register Device B (Mobile Phone)
+    const regB = await postJSON(SERVER_URL + '/register', {
+      id: 'test_dev_phone',
+      name: 'Test Android Phone',
+      userAgent: 'Android'
+    });
+    assert.equal(regB.status, 200);
+    assert.equal(regB.body.id, 'test_dev_phone');
+
+    // 3. GET /devices returns both
+    const devListRes = await fetchPage(SERVER_URL + '/devices');
+    assert.equal(devListRes.status, 200);
+    const devs = JSON.parse(devListRes.body);
+    assert.ok(devs.some(d => d.id === 'test_dev_pc'), 'PC missing from device list');
+    assert.ok(devs.some(d => d.id === 'test_dev_phone'), 'Phone missing from device list');
+
+    // 4. Heartbeat
+    const hbRes = await postJSON(SERVER_URL + '/heartbeat', { id: 'test_dev_phone' });
+    assert.equal(hbRes.status, 200);
+    assert.equal(hbRes.body.success, true);
+
+    // 5. Send files from PC to Phone
+    const sendRes = await postJSON(SERVER_URL + '/send-to-device', {
+      senderId: 'test_dev_pc',
+      targetDeviceId: 'test_dev_phone',
+      files: [{ name: 'sample.txt', size: 100 }]
+    });
+    assert.equal(sendRes.status, 200);
+    assert.equal(sendRes.body.success, true);
+    assert.ok(sendRes.body.transferId);
+    const transferId = sendRes.body.transferId;
+
+    // 6. Incoming queue on Phone
+    const incRes = await fetchPage(SERVER_URL + '/incoming?deviceId=test_dev_phone');
+    assert.equal(incRes.status, 200);
+    const incTransfers = JSON.parse(incRes.body);
+    assert.ok(incTransfers.some(t => t.id === transferId), 'Transfer missing in incoming queue');
+
+    // 7. Accept transfer on Phone
+    const ackRes = await postJSON(SERVER_URL + '/ack-transfer', {
+      deviceId: 'test_dev_phone',
+      transferId: transferId,
+      action: 'accept'
+    });
+    assert.equal(ackRes.status, 200);
+    assert.equal(ackRes.body.success, true);
+
+    // 8. Transfer status is accepted
+    const statusRes = await fetchPage(SERVER_URL + '/transfer-status?transferId=' + transferId);
+    assert.equal(statusRes.status, 200);
+    const statusData = JSON.parse(statusRes.body);
+    assert.equal(statusData.status, 'accepted');
+
+    // 9. Unregister devices
+    await postJSON(SERVER_URL + '/unregister', { id: 'test_dev_pc' });
+    await postJSON(SERVER_URL + '/unregister', { id: 'test_dev_phone' });
   });
 });

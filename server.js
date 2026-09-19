@@ -2,14 +2,53 @@ const http = require('http');
 const https = require('https');
 const fs = require('fs');
 const path = require('path');
+const os = require('os');
 
 const HTTP_PORT = 8001;
 const HTTPS_PORT = 8443;
-const HOST_IP = '192.168.137.1';
-let saveDir = 'D:\\art';
+
+function getAllLocalIPs() {
+  const nets = os.networkInterfaces();
+  const list = [];
+  for (const name of Object.keys(nets)) {
+    for (const net of nets[name]) {
+      if (net.family === 'IPv4' && !net.internal) {
+        list.push({ name, address: net.address });
+      }
+    }
+  }
+  return list;
+}
+
+function getLocalIP() {
+  const ips = getAllLocalIPs();
+  if (!ips.length) return 'localhost';
+  // Check Wi-Fi / Hotspot interfaces first
+  const wifi = ips.find(i => /wi-?fi|wireless|wlan|hotspot/i.test(i.name));
+  if (wifi) return wifi.address;
+  // Physical Ethernet
+  const eth = ips.find(i => /ethernet|lan/i.test(i.name) && !/vEthernet|virtual|wsl|vmware/i.test(i.name));
+  if (eth) return eth.address;
+  // Any non-virtual adapter
+  const real = ips.find(i => !/vEthernet|virtual|wsl|vmware/i.test(i.name));
+  if (real) return real.address;
+  return ips[0].address;
+}
+
+function cleanIP(ip) {
+  if (!ip) return '127.0.0.1';
+  let c = ip.replace(/^.*:/, '');
+  if (c === '1') c = '127.0.0.1';
+  return c;
+}
+
+const HOST_IP = getLocalIP();
+let saveDir = path.join(os.homedir(), 'File Transfer');
 const CERT_DIR = path.join(__dirname, '.cert');
+const TRANSFERS_DIR = path.join(saveDir, '.transfers');
 if (!fs.existsSync(saveDir)) fs.mkdirSync(saveDir, { recursive: true });
 if (!fs.existsSync(CERT_DIR)) fs.mkdirSync(CERT_DIR, { recursive: true });
+if (!fs.existsSync(TRANSFERS_DIR)) fs.mkdirSync(TRANSFERS_DIR, { recursive: true });
 
 // Performance: increase UV threadpool for concurrent file I/O
 process.env.UV_THREADPOOL_SIZE = '16';
@@ -25,10 +64,16 @@ async function getTlsOptions() {
   console.log('[HTTPS] Generating self-signed certificate (one time)...');
   const selfsigned = require('selfsigned');
   const attrs = [{ name: 'commonName', value: HOST_IP }];
+  const altNames = [{ type: 7, ip: HOST_IP }, { type: 7, ip: '127.0.0.1' }];
+  for (const item of getAllLocalIPs()) {
+    if (item.address !== HOST_IP && item.address !== '127.0.0.1') {
+      altNames.push({ type: 7, ip: item.address });
+    }
+  }
   const pems = await selfsigned.generate(attrs, {
     days: 3650,
     keySize: 2048,
-    extensions: [{ name: 'subjectAltName', altNames: [{ type: 7, ip: HOST_IP }, { type: 7, ip: '127.0.0.1' }] }]
+    extensions: [{ name: 'subjectAltName', altNames }]
   });
   // newer selfsigned uses cert/private, older uses cert/private - check both
   const certPem = pems.cert || pems.certificate;
@@ -43,6 +88,96 @@ let logEvents = [];
 const MAX_LOG = 2000;
 let failedFiles = [];
 let stats = { saved: 0, skipped: 0, failed: 0, savedBytes: 0, skippedBytes: 0, failedBytes: 0 };
+
+const devices = new Map();
+const DEVICE_TIMEOUT = 30000;
+
+function registerDevice(deviceInfo) {
+  const id = deviceInfo.id || generateId();
+  const now = Date.now();
+  const isHost = deviceInfo.isHost || false;
+  devices.set(id, {
+    id,
+    name: deviceInfo.name || (isHost ? 'Host PC' : 'Device'),
+    ip: deviceInfo.ip || '127.0.0.1',
+    userAgent: deviceInfo.userAgent || '',
+    capabilities: deviceInfo.capabilities || ['send', 'receive'],
+    isHost,
+    lastSeen: now,
+    registeredAt: now
+  });
+  addLog('Device connected: ' + devices.get(id).name + ' (' + devices.get(id).ip + ')', 'info');
+  return id;
+}
+
+function unregisterDevice(id) {
+  const device = devices.get(id);
+  if (device) {
+    addLog('Device disconnected: ' + device.name, 'info');
+    devices.delete(id);
+  }
+}
+
+function updateDeviceHeartbeat(id) {
+  const device = devices.get(id);
+  if (device) {
+    device.lastSeen = Date.now();
+  }
+}
+
+function getActiveDevices() {
+  const now = Date.now();
+  const active = [];
+  for (const [id, device] of devices) {
+    if (now - device.lastSeen < DEVICE_TIMEOUT) {
+      active.push({ ...device, online: true });
+    } else {
+      devices.delete(id);
+    }
+  }
+  return active;
+}
+
+function generateId() {
+  return 'dev_' + Math.random().toString(36).substr(2, 9) + Date.now().toString(36);
+}
+
+const incomingTransfers = new Map();
+
+function queueIncomingTransfer(targetDeviceId, transfer) {
+  if (!incomingTransfers.has(targetDeviceId)) {
+    incomingTransfers.set(targetDeviceId, []);
+  }
+  const id = generateId();
+  const t = {
+    ...transfer,
+    id,
+    status: 'accepted', // no manual accept step — receiving is automatic
+    uploadedFiles: [],
+    receivedBytes: 0,
+    createdAt: Date.now(),
+    completedAt: 0
+  };
+  incomingTransfers.get(targetDeviceId).push(t);
+  return t;
+}
+
+function getIncomingTransfers(deviceId) {
+  const transfers = incomingTransfers.get(deviceId) || [];
+  const now = Date.now();
+  // Recently completed stay visible so receivers see what landed,
+  // even if the whole transfer finished between two polls.
+  return transfers.filter(t => t.status === 'pending' || t.status === 'accepted' || t.status === 'ready' ||
+    (t.status === 'completed' && now - (t.completedAt || 0) < 10 * 60 * 1000));
+}
+
+function markTransferDelivered(deviceId, transferId) {
+  const transfers = incomingTransfers.get(deviceId) || [];
+  const transfer = transfers.find(t => t.id === transferId);
+  if (transfer) {
+    transfer.status = 'delivered';
+  }
+}
 
 function addLog(msg, type = 'info', size = 0, dedupKey = '') {
   const entry = { time: new Date().toLocaleTimeString(), msg, type, size, dedupKey };
@@ -107,142 +242,129 @@ const senderHtml = `<!DOCTYPE html>
 <head>
   <title>Send to PC</title>
   <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
   <style>
     * { box-sizing: border-box; margin: 0; padding: 0; }
-    body { font-family: system-ui, sans-serif; background: #1a1a2e; color: #eee; min-height: 100vh; padding: 1rem; }
-    .center { display: flex; justify-content: center; }
-    .card { background: #16213e; padding: 1.5rem; border-radius: 16px; width: 100%; max-width: 700px; box-shadow: 0 8px 32px rgba(0,0,0,.4); }
-    h2 { margin-bottom: .25rem; }
-    .sub { color: #888; font-size: .85rem; margin-bottom: 1rem; }
-    .drop-zone { border: 2px dashed #444; border-radius: 12px; padding: 1.5rem; text-align: center; cursor: pointer; transition: .2s; }
-    .drop-zone.dragover { border-color: #4fc3f7; background: rgba(79,195,247,.1); }
+    body { font-family: system-ui, sans-serif; background: #000; color: #fff; min-height: 100vh; padding: 12px; font-size: 14px; line-height: 1.4; }
+    .center { max-width: 520px; margin: 0 auto; }
+    .card { background: none; padding: 0; width: 100%; }
+    .nav { display: flex; justify-content: space-between; align-items: center; padding: 4px 0 8px; border-bottom: 1px solid #222; margin-bottom: 10px; font-size: 13px; }
+    .nav b { font-weight: 600; }
+    .nav a { color: #fff; font-size: 13px; text-decoration: underline; }
+    h2 { font-size: 16px; font-weight: 600; margin-bottom: 2px; }
+    .sub { color: #888; font-size: 12px; margin-bottom: 10px; word-break: break-all; }
+    .drop-zone { border: 1px dashed #444; border-radius: 4px; padding: 12px; text-align: center; }
+    .drop-zone.dragover { border-color: #fff; }
     .drop-zone input { display: none; }
-    .drop-zone p { color: #aaa; font-size: .9rem; }
-    .top-bar { display: flex; gap: .5rem; align-items: center; margin-top: 1rem; }
-    .top-bar .btn { flex: 1; background: #4fc3f7; color: #111; border: none; padding: .6rem 1rem; border-radius: 8px; font-size: .95rem; cursor: pointer; font-weight: 600; }
-    .top-bar .btn:disabled { opacity: .4; cursor: not-allowed; }
-    .progress-wrap { margin-top: 1rem; display: none; }
+    .drop-zone p { color: #888; font-size: 12px; }
+    .pick-row { display: flex; gap: 8px; margin-top: 8px; }
+    .pick-row .btn { flex: 1; background: #000; color: #fff; border: 1px solid #444; font-size: 13px; padding: 8px; border-radius: 4px; cursor: pointer; font-weight: 600; }
+    .top-bar { display: flex; gap: 8px; margin-top: 10px; }
+    .top-bar .btn { flex: 1; background: #fff; color: #000; border: 1px solid #fff; padding: 9px; border-radius: 4px; font-size: 14px; cursor: pointer; font-weight: 600; }
+    .top-bar .btn:disabled { opacity: .3; cursor: not-allowed; }
+    .progress-wrap { margin-top: 10px; display: none; }
     .progress-wrap.active { display: block; }
-    .bar-bg { background: #333; border-radius: 8px; overflow: hidden; height: 22px; width: 100%; }
-    .bar-fill { height: 100%; width: 0%; background: linear-gradient(90deg, #4fc3f7, #00e676); transition: width .2s; border-radius: 8px; }
-    .info-row { display: flex; justify-content: space-between; margin-top: .3rem; font-size: .82rem; color: #aaa; }
-    .status { margin-top: .5rem; text-align: center; font-size: .9rem; min-height: 1.5rem; }
-    .file-info { margin-top: .5rem; font-size: .78rem; color: #aaa; }
-    .logs-section { margin-top: 1rem; border-top: 1px solid #333; padding-top: .5rem; }
-    .log-tabs { display: flex; gap: 2px; margin-bottom: .3rem; }
-    .log-tab { padding: .3rem .7rem; border-radius: 6px 6px 0 0; font-size: .8rem; cursor: pointer; border: none; color: #aaa; background: #222; }
-    .log-tab.active { color: #fff; }
-    .log-tab.saved.active { background: #064; }
-    .log-tab.skip.active { background: #660; }
-    .log-tab.error.active { background: #600; }
-    .log-tab.all.active { background: #333; }
-    .log-panel { display: none; max-height: 250px; overflow-y: auto; background: #111; border-radius: 0 0 8px 8px; padding: .4rem; font-family: monospace; font-size: .75rem; }
+    .bar-bg { background: #222; border-radius: 2px; overflow: hidden; height: 4px; width: 100%; }
+    .bar-fill { height: 100%; width: 0%; background: #fff; transition: width .2s; }
+    .info-row { display: flex; justify-content: space-between; margin-top: 4px; font-size: 12px; color: #888; }
+    .status { margin-top: 6px; font-size: 13px; min-height: 1.2rem; color: #fff; }
+    .file-info { margin-top: 8px; font-size: 12px; color: #aaa; }
+    .logs-section { margin-top: 12px; border-top: 1px solid #222; padding-top: 8px; }
+    .log-tabs { display: flex; gap: 12px; margin-bottom: 6px; }
+    .log-tab { padding: 2px 0; font-size: 12px; cursor: pointer; border: none; color: #666; background: none; border-bottom: 1px solid transparent; }
+    .log-tab.active { color: #fff; border-bottom-color: #fff; }
+    .log-panel { display: none; max-height: 200px; overflow-y: auto; padding: 0; font-family: monospace; font-size: 12px; }
     .log-panel.active { display: block; }
-    .log-panel div { padding: 2px 4px; border-bottom: 1px solid #1a1a1a; line-height: 1.4; }
+    .log-panel div { padding: 3px 0; border-bottom: 1px solid #111; line-height: 1.4; color: #ccc; }
     .log-panel .time { color: #555; margin-right: .3rem; }
-    .log-panel .saved { color: #0f0; }
-    .log-panel .skip { color: #ff0; }
-    .log-panel .error { color: #f33; }
-    .log-panel .info { color: #0cf; }
-    .log-panel .folder-skip { color: #fb0; font-weight: 600; }
-    .log-panel .indent { color: #888; }
-    .summary-bar { display: none; background: #0a1628; border: 1px solid #1a3a5c; border-radius: 6px; padding: .5rem .8rem; margin-bottom: .3rem; font-size: .8rem; color: #8ab4f8; }
-    .summary-bar.active { display: flex; gap: 1.5rem; align-items: center; flex-wrap: wrap; }
-    .summary-bar .item { display: flex; align-items: center; gap: .3rem; }
-    .summary-bar .dot { width: 8px; height: 8px; border-radius: 50%; display: inline-block; }
-    .summary-bar .dot.green { background: #0f0; }
-    .summary-bar .dot.yellow { background: #ff0; }
-    .summary-bar .dot.red { background: #f33; }
-    .failed-wrap { margin-top: 1rem; display: none; background: #2a1515; border: 1px solid #f33; border-radius: 8px; padding: .8rem; }
+    .log-panel .saved, .log-panel .skip, .log-panel .error, .log-panel .info, .log-panel .folder-skip, .log-panel .indent { color: #ccc; }
+    .summary-bar { display: none; padding: 6px 0; margin-bottom: 4px; font-size: 12px; color: #888; border-bottom: 1px solid #222; }
+    .summary-bar.active { display: flex; gap: 12px; flex-wrap: wrap; }
+    .summary-bar .item { display: flex; align-items: center; gap: 4px; }
+    .summary-bar .dot { width: 6px; height: 6px; border-radius: 50%; display: inline-block; background: #fff; }
+    .failed-wrap { margin-top: 10px; display: none; border-top: 1px solid #222; padding-top: 8px; }
     .failed-wrap.active { display: block; }
-    .failed-wrap h3 { color: #f33; font-size: .9rem; margin-bottom: .4rem; }
-    .retry-btn { background: #f33; color: #fff; border: none; padding: .5rem 1.5rem; border-radius: 8px; font-size: .9rem; cursor: pointer; font-weight: 600; margin-top: .5rem; }
-    .retry-btn:disabled { opacity: .4; cursor: not-allowed; }
-    .fb-panel { display:none; margin-bottom:.5rem; background:#0a1628; border:1px solid #1a3a5c; border-radius:8px; overflow:hidden; }
-    .fb-panel.active { display:block; }
-    .fb-breadcrumb { display:flex; align-items:center; gap:.2rem; flex-wrap:wrap; padding:.5rem .6rem; background:#0d1f3c; border-bottom:1px solid #1a3a5c; font-size:.8rem; }
-    .fb-crumb { cursor:pointer; color:#4fc3f7; padding:2px 6px; border-radius:4px; }
-    .fb-crumb:active { background:#1a3a5c; }
-    .fb-sep { color:#555; font-size:.7rem; }
-    .fb-list { max-height:250px; overflow-y:auto; padding:.3rem; }
-    .fb-folder { padding:.55rem .7rem; cursor:pointer; border-radius:6px; font-size:.85rem; color:#ccc; display:flex; align-items:center; gap:.5rem; }
-    .fb-folder:active { background:#1a3a5c; }
-    .fb-empty { color:#666; font-size:.8rem; padding:.5rem .7rem; }
-    .fb-bar { display:flex; gap:.4rem; padding:.4rem .5rem; border-top:1px solid #1a3a5c; background:#0d1f3c; }
-    .fb-use-btn { flex:1; background:#1a5c3a; color:#4eff8a; border:none; padding:.5rem; border-radius:6px; font-size:.85rem; cursor:pointer; font-weight:600; }
-    .fb-use-btn:active { background:#0f4a2e; }
-    .fb-cancel-btn { background:#333; color:#aaa; border:none; padding:.5rem .8rem; border-radius:6px; font-size:.85rem; cursor:pointer; }
-
-    .skip-panel { margin-bottom:.5rem; background:#0a1628; border:1px solid #1a3a5c; border-radius:8px; overflow:hidden; }
-    .skip-panel-head { display:flex; align-items:center; justify-content:space-between; padding:.45rem .7rem; cursor:pointer; }
-    .skip-panel-head span { font-size:.85rem; color:#8ab4f8; }
-    .skip-tags { display:flex; flex-wrap:wrap; gap:.3rem; padding:0 .7rem .5rem; }
-    .skip-tag { display:inline-flex; align-items:center; gap:.3rem; background:#1a3a5c; color:#ccc; padding:.2rem .5rem; border-radius:12px; font-size:.75rem; }
-    .skip-tag .x { cursor:pointer; color:#f66; font-weight:700; margin-left:.1rem; }
-    .skip-tag .x:hover { color:#f33; }
-    .skip-add { display:flex; gap:.3rem; padding:0 .7rem .5rem; }
-    .skip-add input { flex:1; background:#111; border:1px solid #333; color:#ccc; padding:.3rem .5rem; border-radius:6px; font-size:.8rem; }
-    .skip-add button { background:#1a3a5c; color:#8ab4f8; border:none; padding:.3rem .7rem; border-radius:6px; font-size:.8rem; cursor:pointer; font-weight:600; }
-    .stop-btn { background:#f33; color:#fff; border:none; padding:.6rem 1rem; border-radius:8px; font-size:.95rem; cursor:pointer; font-weight:600; }
-    .stop-btn:disabled { opacity:.4; cursor:not-allowed; }
-    .resend-btn { background:#ff9800; color:#111; border:none; padding:.6rem 1rem; border-radius:8px; font-size:.95rem; cursor:pointer; font-weight:600; }
-    .resend-btn:disabled { opacity:.4; cursor:not-allowed; }
+    .failed-wrap h3 { color: #fff; font-size: 13px; margin-bottom: 6px; font-weight: 600; }
+    .retry-btn { background: #000; color: #fff; border: 1px solid #fff; padding: 8px 12px; border-radius: 4px; font-size: 13px; cursor: pointer; font-weight: 600; margin-top: 6px; }
+    .retry-btn:disabled { opacity: .3; cursor: not-allowed; }
+    .fb-panel { display: none; margin: 8px 0; border: 1px solid #222; border-radius: 4px; overflow: hidden; }
+    .fb-panel.active { display: block; }
+    .fb-breadcrumb { display: flex; align-items: center; gap: 2px; flex-wrap: wrap; padding: 6px 8px; border-bottom: 1px solid #222; font-size: 12px; color: #888; }
+    .fb-crumb { cursor: pointer; color: #fff; padding: 2px 4px; text-decoration: underline; }
+    .fb-sep { color: #444; font-size: 11px; }
+    .fb-list { max-height: 220px; overflow-y: auto; }
+    .fb-folder { padding: 8px; cursor: pointer; font-size: 13px; color: #fff; display: flex; align-items: center; gap: 8px; border-bottom: 1px solid #111; }
+    .fb-empty { color: #666; font-size: 12px; padding: 8px; }
+    .fb-bar { display: flex; gap: 8px; padding: 8px; border-top: 1px solid #222; }
+    .fb-use-btn { flex: 1; background: #fff; color: #000; border: 1px solid #fff; padding: 8px; border-radius: 4px; font-size: 13px; cursor: pointer; font-weight: 600; }
+    .fb-cancel-btn { background: #000; color: #888; border: 1px solid #333; padding: 8px 12px; border-radius: 4px; font-size: 13px; cursor: pointer; }
+    .skip-panel { margin-bottom: 8px; border-bottom: 1px solid #222; padding-bottom: 6px; }
+    .skip-panel-head { display: flex; align-items: center; justify-content: space-between; padding: 4px 0; cursor: pointer; }
+    .skip-panel-head span { font-size: 12px; color: #888; }
+    .skip-tags { display: flex; flex-wrap: wrap; gap: 6px; padding: 4px 0; }
+    .skip-tag { display: inline-flex; align-items: center; gap: 6px; border: 1px solid #333; color: #fff; padding: 2px 8px; border-radius: 20px; font-size: 12px; }
+    .skip-tag .x { cursor: pointer; color: #fff; font-weight: 700; }
+    .skip-add { display: flex; gap: 8px; padding: 4px 0; }
+    .skip-add input { flex: 1; background: #000; border: 1px solid #333; color: #fff; padding: 6px 8px; border-radius: 4px; font-size: 13px; }
+    .skip-add button { background: #000; color: #fff; border: 1px solid #444; padding: 6px 10px; border-radius: 4px; font-size: 13px; cursor: pointer; }
+    .stop-btn, .resend-btn { background: #000; color: #fff; border: 1px solid #fff; padding: 9px; border-radius: 4px; font-size: 14px; cursor: pointer; font-weight: 600; }
+    .stop-btn:disabled, .resend-btn:disabled { opacity: .3; cursor: not-allowed; }
+    .dest-row { display: flex; gap: 8px; align-items: center; padding: 8px 0; border-bottom: 1px solid #222; margin-bottom: 8px; font-size: 13px; }
+    .row-label { color: #888; font-size: 12px; white-space: nowrap; }
+    .row-val { flex: 1; color: #fff; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 12px; }
+    .link-btn { background: none; border: none; color: #fff; font-size: 12px; cursor: pointer; text-decoration: underline; white-space: nowrap; }
   </style>
 </head>
 <body>
 <div class="center">
 <div class="card">
-  <h2>Send to this PC</h2>
-  <div class="sub" id="saveToLabel">Saves to D:\\art &bull; smart folder skip</div>
+  <div class="nav">
+    <b>Send to PC</b>
+    <a href="/devices-ui">Devices &rarr;</a>
+  </div>
+  <div class="sub" id="saveToLabel">Saves to File Transfer</div>
   <div class="skip-panel" id="skipPanel">
     <div class="skip-panel-head" id="skipPanelHead">
-      <span>⚙️ Skip Folders</span>
-      <span style="font-size:.75rem;color:#666" id="skipCount"></span>
+      <span>Skip folders</span>
+      <span id="skipCount"></span>
     </div>
     <div id="skipPanelBody" style="display:none">
       <div class="skip-tags" id="skipTags"></div>
       <div class="skip-add">
         <input type="text" id="skipInput" placeholder="folder name (e.g. dist)">
-        <button id="skipAddBtn">+ Add</button>
+        <button id="skipAddBtn">Add</button>
       </div>
     </div>
   </div>
 
-  <!-- Destination row -->
-  <div style="margin-bottom:.5rem;display:flex;gap:.5rem;align-items:center;background:#0a1628;border:1px solid #1a3a5c;border-radius:8px;padding:.5rem .7rem">
-    <span style="font-size:.85rem;color:#8ab4f8;flex:0 0 auto">\ud83d\udce5 Save to:</span>
-    <span id="destLabel" style="flex:1;font-size:.85rem;color:#ccc;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">D:\\art (root)</span>
-    <button id="destBrowseBtn" style="background:#1a3a5c;color:#8ab4f8;border:none;padding:.35rem .75rem;border-radius:6px;font-size:.8rem;cursor:pointer;font-weight:600;white-space:nowrap">\ud83d\udcc1 Change</button>
+  <div class="dest-row">
+    <span class="row-label">Save to</span>
+    <span class="row-val" id="destLabel">File Transfer (root)</span>
+    <button class="link-btn" id="destBrowseBtn">Change</button>
   </div>
-  <!-- Destination browser panel (server-side folder tree) -->
   <div class="fb-panel" id="destBrowser">
-    <div style="padding:.5rem .6rem;background:#0d1f3c;border-bottom:1px solid #1a3a5c;font-size:.85rem;color:#4fc3f7;font-weight:600;display:flex;justify-content:space-between;align-items:center">
-      <span>📥 Pick Save Destination</span>
-      <span style="font-size:.75rem;color:#888;font-weight:normal">tap folder to go deeper</span>
-    </div>
     <div class="fb-breadcrumb" id="dbBreadcrumb"></div>
     <div class="fb-list" id="dbList"><div class="fb-empty">Loading...</div></div>
     <div class="fb-bar">
-      <button class="fb-use-btn" id="dbUseBtn">📍 Use this folder</button>
-      <button id="dbRootBtn" style="background:#3a1a5c;color:#c084fc;border:none;padding:.5rem .8rem;border-radius:6px;font-size:.85rem;cursor:pointer;font-weight:600;white-space:nowrap">⬆️ Set as Root</button>
+      <button class="fb-use-btn" id="dbUseBtn">Use this folder</button>
+      <button class="fb-cancel-btn" id="dbRootBtn">Set as root</button>
       <button class="fb-cancel-btn" id="dbCancelBtn">Cancel</button>
     </div>
   </div>
-  <div class="drop-zone" id="dropZone" style="border: 2px dashed #444; border-radius: 12px; padding: 1.5rem; text-align: center; cursor: default;">
-    <p style="margin-bottom: 0.8rem; color: #aaa;">Drag & drop files/folders here</p>
-    <p style="color: #666; font-size: 0.85rem; margin-bottom: 0.8rem;">— OR —</p>
-    <div style="display: flex; gap: 0.8rem; justify-content: center;">
-      <button type="button" class="btn" id="selectFolderBtn" style="background: #1a3a5c; color: #8ab4f8; font-size: 0.85rem; padding: 0.6rem 1.2rem; border-radius: 8px; border: none; cursor: pointer; font-weight: 600;">📂 Browse Folder</button>
-      <button type="button" class="btn" id="selectFilesBtn" style="background: #1a3a5c; color: #8ab4f8; font-size: 0.85rem; padding: 0.6rem 1.2rem; border-radius: 8px; border: none; cursor: pointer; font-weight: 600;">Select Files</button>
+  <div class="drop-zone" id="dropZone">
+    <p>Drop files / folders here</p>
+    <div class="pick-row">
+      <button type="button" class="btn" id="selectFolderBtn">Folder</button>
+      <button type="button" class="btn" id="selectFilesBtn">Files</button>
     </div>
-    <input type="file" id="folderInput" webkitdirectory multiple style="opacity: 0; position: absolute; width: 0; height: 0; z-index: -1;">
-    <input type="file" id="fileInput" multiple style="opacity: 0; position: absolute; width: 0; height: 0; z-index: -1;">
+    <input type="file" id="folderInput" webkitdirectory multiple style="opacity:0;position:absolute;width:0;height:0">
+    <input type="file" id="fileInput" multiple style="opacity:0;position:absolute;width:0;height:0">
   </div>
-  <div id="subfolderList" style="display:none;margin:.5rem 0;max-height:200px;overflow-y:auto;background:#0a1628;border:1px solid #1a3a5c;border-radius:8px;padding:.5rem"></div>
+  <div id="subfolderList" style="display:none;margin:8px 0;max-height:200px;overflow-y:auto;border-top:1px solid #222;border-bottom:1px solid #222"></div>
   <div class="top-bar">
     <button class="btn" id="sendBtn" disabled>Send</button>
-    <button class="btn" id="stopBtn" style="display:none;background:#f33;color:#fff">Stop</button>
-    <button class="btn" id="resendBtn" style="display:none;background:#ff9800;color:#111">Resend All</button>
+    <button class="btn" id="stopBtn" style="display:none">Stop</button>
+    <button class="btn" id="resendBtn" style="display:none">Send more</button>
   </div>
   <div class="file-info" id="fileInfo"></div>
   <div class="progress-wrap" id="progressWrap">
@@ -290,17 +412,13 @@ const statusHtml = `<!DOCTYPE html>
 <head><title>Receiver Status</title><meta charset="utf-8">
 <style>
   * { box-sizing: border-box; margin: 0; padding: 0; }
-  body { font-family: monospace; background: #111; color: #ddd; padding: 1rem; }
-  h2 { color: #fff; margin-bottom: .3rem; }
-  .summary { color: #0f0; font-size: .9rem; margin-bottom: .3rem; }
-  .failed-header { color: #f33; font-size: .85rem; margin-bottom: .3rem; }
-  .log { border: 1px solid #333; padding: .5rem; height: 80vh; overflow-y: auto; }
-  .entry { padding: 2px 0; border-bottom: 1px solid #1a1a1a; }
-  .entry .time { color: #666; }
-  .entry.saved { color: #0f0; }
-  .entry.skip { color: #ff0; }
-  .entry.error { color: #f33; }
-  .entry.info { color: #0cf; }
+  body { font-family: monospace; background: #000; color: #fff; padding: 12px; font-size: 13px; }
+  h2 { color: #fff; margin-bottom: 4px; font-size: 15px; }
+  .summary { color: #fff; font-size: 13px; margin-bottom: 4px; }
+  .failed-header { color: #fff; font-size: 12px; margin-bottom: 4px; }
+  .log { border-top: 1px solid #222; padding: 8px 0; height: 80vh; overflow-y: auto; }
+  .entry { padding: 3px 0; border-bottom: 1px solid #111; color: #ccc; }
+  .entry .time { color: #555; }
 </style></head>
 <body>
   <h2>Receiver Log</h2>
@@ -343,11 +461,132 @@ const statusHtml = `<!DOCTYPE html>
   </script>
 </body></html>`;
 
+const devicesHtml = `<!DOCTYPE html>
+<html>
+<head>
+  <title>File Share</title>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body { font-family: system-ui, sans-serif; background: #000; color: #fff; min-height: 100vh; padding: 12px; font-size: 14px; line-height: 1.4; }
+    .wrap { max-width: 520px; margin: 0 auto; }
+    .top { display: flex; justify-content: space-between; align-items: baseline; gap: 8px; padding-bottom: 8px; border-bottom: 1px solid #222; }
+    .top a { color: #fff; font-size: 12px; }
+    .top button { background: none; border: none; color: #fff; font-size: 12px; text-decoration: underline; cursor: pointer; }
+    .dim { color: #888; font-size: 12px; }
+    .sec { font-size: 12px; color: #888; text-transform: uppercase; letter-spacing: .06em; margin: 14px 0 4px; }
+    .dev { display: flex; align-items: center; gap: 10px; padding: 8px 0; border-bottom: 1px solid #222; }
+    .dev .nm { flex: 1; min-width: 0; }
+    .dev .nm b { font-size: 14px; }
+    .dev .ip { font-size: 12px; color: #888; }
+    .btn { background: #fff; color: #000; border: 1px solid #fff; border-radius: 4px; padding: 8px 12px; font-size: 13px; font-weight: 600; cursor: pointer; }
+    .btn:disabled { opacity: .3; }
+    .ghost { background: #000; color: #fff; border: 1px solid #444; border-radius: 4px; padding: 8px 12px; font-size: 13px; font-weight: 600; cursor: pointer; }
+    .panel { border: 1px solid #333; border-radius: 4px; padding: 10px; margin-top: 10px; }
+    .panel.over { border-color: #fff; }
+    .row { display: flex; gap: 8px; }
+    .row .btn, .row .ghost { flex: 1; }
+    #dropZone { border: none; padding: 0; margin: 0; }
+    #saveRow { display: flex; gap: 8px; align-items: baseline; padding: 8px 0; border-bottom: 1px solid #222; font-size: 13px; }
+    #saveLabel { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 12px; }
+    .link { background: none; border: none; color: #fff; font-size: 12px; text-decoration: underline; cursor: pointer; white-space: nowrap; }
+    #saveBrowser { border: 1px solid #222; border-radius: 4px; margin: 8px 0; }
+    #sbCrumb { display: flex; flex-wrap: wrap; gap: 2px; padding: 6px 8px; border-bottom: 1px solid #222; font-size: 12px; color: #888; }
+    #sbCrumb .c { color: #fff; text-decoration: underline; cursor: pointer; }
+    #sbList { max-height: 200px; overflow-y: auto; }
+    #sbList .f { padding: 8px; border-bottom: 1px solid #111; font-size: 13px; display: flex; justify-content: space-between; cursor: pointer; }
+    #sbBar { display: flex; gap: 8px; padding: 8px; }
+    .h { padding: 8px 0; border-bottom: 1px solid #222; }
+    .h .l1 { display: flex; gap: 8px; align-items: baseline; }
+    .dir { font-weight: 700; font-size: 12px; border: 1px solid #444; border-radius: 3px; padding: 0 5px; white-space: nowrap; }
+    .h .nm { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-weight: 600; }
+    .h .sz { font-size: 12px; color: #888; white-space: nowrap; }
+    .h .l2 { display: flex; justify-content: space-between; gap: 8px; margin-top: 2px; }
+    .h .sp { font-size: 12px; color: #fff; white-space: nowrap; }
+    .h .pp { font-size: 12px; color: #888; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; cursor: pointer; }
+    .h .peer { font-weight: 600; flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .h .st { font-size: 12px; color: #888; white-space: nowrap; }
+    .h .meta { font-size: 12px; color: #888; margin-top: 2px; }
+    .h .files { font-size: 12px; color: #888; margin-top: 2px; }
+    .bar { background: #222; height: 4px; border-radius: 2px; margin-top: 6px; overflow: hidden; }
+    .bar i { display: block; height: 100%; width: 0%; background: #fff; }
+    .h .prog { display: flex; justify-content: space-between; font-size: 12px; color: #888; margin-top: 3px; }
+    .h .path { display: flex; gap: 8px; align-items: baseline; font-size: 12px; color: #888; margin-top: 4px; }
+    .h .path span { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .h .acts { display: flex; gap: 8px; margin-top: 6px; }
+    .h .acts .btn, .h .acts .ghost { flex: 1; }
+    .dl { display: flex; justify-content: space-between; gap: 8px; padding: 5px 0; border-bottom: 1px solid #111; font-size: 13px; }
+    .dl span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; flex: 1; }
+    .dl a { color: #fff; }
+    .empty { color: #666; font-size: 13px; padding: 8px 0; }
+  </style>
+</head>
+<body>
+<div class="wrap">
+  <div class="top">
+    <div><b>File Share</b> <span class="dim" id="selfInfo">…</span></div>
+    <div><a href="/">Upload</a> &nbsp;<button id="refreshBtn">Refresh</button></div>
+  </div>
+
+  <div class="sec">Devices</div>
+  <div id="deviceList"><div class="empty">Looking for devices…</div></div>
+
+  <div class="panel" id="sendPanel" style="display:none">
+    <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px"><b id="targetDeviceName">Send</b></div>
+    <div id="dropZone">
+      <div id="pickerStep" class="row">
+        <button class="ghost" id="selectFolderBtn">Folder</button>
+        <button class="ghost" id="selectFilesBtn">Files</button>
+      </div>
+      <div id="readyStep" style="display:none">
+        <div id="readySummary" class="dim" style="margin-bottom:8px"></div>
+        <button class="btn" id="sendBtn" style="width:100%">Send</button>
+      </div>
+      <input type="file" id="folderInput" webkitdirectory multiple style="opacity:0;position:absolute;width:0;height:0">
+      <input type="file" id="fileInput" multiple style="opacity:0;position:absolute;width:0;height:0">
+    </div>
+  </div>
+
+  <div class="sec">Transfers</div>
+  <div id="saveRow">
+    <span class="dim">Save to</span>
+    <span id="saveLabel" style="cursor:pointer;text-decoration:underline;text-underline-offset:2px" title="Show in folder">…</span>
+    <button class="link" id="saveChangeBtn">Change</button>
+    <button class="link" id="saveFolderBtn" style="display:none">Folder</button>
+  </div>
+  <div id="saveBrowser" style="display:none">
+    <div id="sbCrumb"></div>
+    <div id="sbList"></div>
+    <div id="sbBar">
+      <button class="btn" id="sbUseBtn" style="flex:1">Use folder</button>
+      <button class="ghost" id="sbCancelBtn">Cancel</button>
+    </div>
+  </div>
+  <div id="histList"></div>
+  <div class="empty" id="noHist">Nothing yet — send or receive to see it here.</div>
+</div>
+
+<script>
+__DEVICES_CLIENT_JS__
+</script>
+</body>
+</html>`;
+
+
+
+const devicesClientJs = fs.readFileSync(path.join(__dirname, 'devices-client.js'), 'utf8');
+const devicesHtmlFinal = devicesHtml.replace('__DEVICES_CLIENT_JS__', devicesClientJs);
+
 const requestHandler = (req, res) => {
   const url = new URL(req.url, 'https://localhost');
   const pathname = url.pathname;
 
   if (req.method === 'GET') {
+    if (pathname === '/devices-ui') {
+      res.writeHead(200, { 'Content-Type': 'text/html', 'Cache-Control': 'no-store' });
+      res.end(devicesHtmlFinal); return;
+    }
     if (pathname === '/status') {
       res.writeHead(200, { 'Content-Type': 'text/html', 'Cache-Control': 'no-store' });
       res.end(statusHtml); return;
@@ -396,6 +635,74 @@ const requestHandler = (req, res) => {
     if (pathname === '/dest-root') {
       res.writeHead(200, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' });
       res.end(JSON.stringify({ root: saveDir })); return;
+    }
+    if (pathname === '/devices') {
+      res.writeHead(200, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' });
+      res.end(JSON.stringify(getActiveDevices())); return;
+    }
+    if (pathname === '/incoming') {
+      const deviceId = url.searchParams.get('deviceId');
+      if (!deviceId) {
+        res.writeHead(400, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ error: 'Missing deviceId' }));
+        return;
+      }
+      updateDeviceHeartbeat(deviceId);
+      const transfers = getIncomingTransfers(deviceId);
+      res.writeHead(200, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' });
+      res.end(JSON.stringify(transfers));
+      return;
+    }
+    if (pathname === '/transfer-status') {
+      const transferId = url.searchParams.get('transferId');
+      if (!transferId) {
+        res.writeHead(400, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ error: 'Missing transferId' }));
+        return;
+      }
+      let transfer = null;
+      for (const [_, list] of incomingTransfers) {
+        const found = list.find(t => t.id === transferId);
+        if (found) { transfer = found; break; }
+      }
+      if (!transfer) {
+        res.writeHead(404, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ error: 'Transfer not found' }));
+        return;
+      }
+      res.writeHead(200, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' });
+      res.end(JSON.stringify({
+        status: transfer.status,
+        files: transfer.files,
+        uploadedFiles: transfer.uploadedFiles || [],
+        receivedBytes: transfer.receivedBytes || 0,
+        totalSize: transfer.totalSize || 0
+      }));
+      return;
+    }
+    if (pathname === '/download-transfer-file') {
+      const transferId = url.searchParams.get('transferId');
+      const filename = url.searchParams.get('name');
+      if (!transferId || !filename) {
+        res.writeHead(400); res.end('Missing parameters'); return;
+      }
+      const cleanName = path.basename(decodeURIComponent(filename));
+      const filePath = path.join(TRANSFERS_DIR, transferId, cleanName);
+      if (!fs.existsSync(filePath)) {
+        res.writeHead(404); res.end('File not found'); return;
+      }
+      try {
+        const stat = fs.statSync(filePath);
+        res.writeHead(200, {
+          'Content-Type': 'application/octet-stream',
+          'Content-Length': stat.size,
+          'Content-Disposition': 'attachment; filename="' + encodeURIComponent(cleanName) + '"'
+        });
+        fs.createReadStream(filePath).pipe(res);
+      } catch(e) {
+        res.writeHead(500); res.end('Error reading file');
+      }
+      return;
     }
     if (pathname === '/dir-tree') {
       const absPath = url.searchParams.get('abs');
@@ -466,6 +773,118 @@ const requestHandler = (req, res) => {
     }
     res.writeHead(200, { 'Content-Type': 'text/html', 'Cache-Control': 'no-store, no-cache, must-revalidate', 'Pragma': 'no-cache' });
     res.end(senderHtmlFinal); return;
+  }
+
+  if (req.method === 'POST' && pathname === '/register') {
+    let body = '';
+    req.on('data', c => body += c);
+    req.on('end', () => {
+      try {
+        const deviceInfo = JSON.parse(body || '{}');
+        const devIP = cleanIP(req.socket.remoteAddress);
+        const isHost = devIP === '127.0.0.1' || devIP === HOST_IP;
+        deviceInfo.ip = devIP;
+        deviceInfo.isHost = isHost;
+        if (isHost && (!deviceInfo.name || deviceInfo.name === 'My Device' || deviceInfo.name === 'Mobile Device')) {
+          deviceInfo.name = 'Host PC';
+        }
+        const id = registerDevice(deviceInfo);
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ id, isHost, devices: getActiveDevices() }));
+      } catch(e) {
+        res.writeHead(400, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ error: e.message }));
+      }
+    });
+    return;
+  }
+
+  if (req.method === 'POST' && pathname === '/unregister') {
+    let body = '';
+    req.on('data', c => body += c);
+    req.on('end', () => {
+      try {
+        const { id } = JSON.parse(body || '{}');
+        if (id) unregisterDevice(id);
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ success: true, devices: getActiveDevices() }));
+      } catch(e) {
+        res.writeHead(400, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ error: e.message }));
+      }
+    });
+    return;
+  }
+
+  if (req.method === 'POST' && pathname === '/heartbeat') {
+    let body = '';
+    req.on('data', c => body += c);
+    req.on('end', () => {
+      try {
+        const { id } = JSON.parse(body || '{}');
+        if (id) updateDeviceHeartbeat(id);
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ success: true }));
+      } catch(e) {
+        res.writeHead(400, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ error: e.message }));
+      }
+    });
+    return;
+  }
+
+  if (req.method === 'POST' && pathname === '/send-to-device') {
+    let body = '';
+    req.on('data', c => body += c);
+    req.on('end', () => {
+      try {
+        const { targetDeviceId, files, senderId } = JSON.parse(body || '{}');
+        const targetDevice = devices.get(targetDeviceId);
+        if (!targetDevice) {
+          res.writeHead(404, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ error: 'Target device not found' }));
+          return;
+        }
+        const senderDevice = devices.get(senderId);
+        const transfer = queueIncomingTransfer(targetDeviceId, {
+          senderId,
+          senderName: senderDevice ? senderDevice.name : 'Unknown Device',
+          targetDeviceId,
+          targetDeviceName: targetDevice.name,
+          files: files || [],
+          totalSize: (files || []).reduce((s, f) => s + (f.size || 0), 0)
+        });
+        addLog('Transfer queued: ' + (senderDevice?.name || 'Device') + ' -> ' + targetDevice.name + ' (' + (files?.length || 0) + ' files)', 'info');
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ success: true, transferId: transfer.id, status: transfer.status }));
+      } catch(e) {
+        res.writeHead(400, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ error: e.message }));
+      }
+    });
+    return;
+  }
+
+  if (req.method === 'POST' && pathname === '/ack-transfer') {
+    let body = '';
+    req.on('data', c => body += c);
+    req.on('end', () => {
+      try {
+        const { deviceId, transferId, action } = JSON.parse(body || '{}');
+        const transfers = incomingTransfers.get(deviceId) || [];
+        const transfer = transfers.find(t => t.id === transferId);
+        if (transfer) {
+          transfer.status = action === 'accept' ? 'accepted' : 'rejected';
+          addLog('Transfer ' + action + ': ' + transfer.senderName + ' -> ' + (devices.get(deviceId)?.name || deviceId), 'info');
+        }
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ success: true, status: transfer ? transfer.status : 'unknown' }));
+      } catch(e) {
+        res.writeHead(400, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ error: e.message }));
+      }
+    });
+    return;
   }
 
   if (req.method === 'POST' && pathname === '/set-dest') {
@@ -631,30 +1050,149 @@ const requestHandler = (req, res) => {
     return;
   }
 
+  if (req.method === 'POST' && pathname === '/reveal') {
+    let body = '';
+    req.on('data', c => body += c);
+    req.on('end', () => {
+      try {
+        const { transferId, name } = JSON.parse(body || '{}');
+        let fullPath = null;
+        if (transferId) {
+          let tr = null;
+          for (const [_, list] of incomingTransfers) {
+            const f = list.find(x => x.id === transferId);
+            if (f) { tr = f; break; }
+          }
+          if (tr) {
+            const targetDev2 = devices.get(tr.targetDeviceId);
+            const toRemote2 = tr && targetDev2 && !targetDev2.isHost;
+            if (toRemote2) {
+              const base = path.join(TRANSFERS_DIR, transferId);
+              fullPath = name ? path.join(base, path.basename(name)) : base;
+            } else {
+              // saved under saveDir with subfolders preserved
+              const rel = name || (tr.files && tr.files[0] && tr.files[0].name) || '';
+              fullPath = rel ? path.join(saveDir, rel.replace(/\//g, '\\')) : saveDir;
+            }
+          }
+        }
+        if (!fullPath && name) {
+          // fallback: treat name as absolute or relative to saveDir
+          if (path.isAbsolute(name) || /^[A-Za-z]:[\\/]/.test(name)) fullPath = name;
+          else fullPath = path.join(saveDir, name.replace(/\//g, '\\'));
+        }
+        if (!fullPath) fullPath = saveDir;
+        // security: only allow paths under saveDir or TRANSFERS_DIR
+        const norm = path.resolve(fullPath);
+        const allowed = [path.resolve(saveDir), path.resolve(TRANSFERS_DIR)].some(a => norm === a || norm.startsWith(a + path.sep));
+        if (!allowed) {
+          // still allow revealing saveDir itself
+          if (norm !== path.resolve(saveDir)) {
+            res.writeHead(403, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({ error: 'Path not allowed' }));
+            return;
+          }
+        }
+        let toOpen = norm;
+        // if file exists, highlight it; otherwise open its parent folder
+        try {
+          if (fs.existsSync(norm)) {
+            const st = fs.statSync(norm);
+            if (st.isFile()) toOpen = norm;
+            else toOpen = norm;
+          } else {
+            // file may have been moved/deleted — open parent that exists
+            let cur = norm;
+            while (cur && !fs.existsSync(cur) && cur !== path.dirname(cur)) cur = path.dirname(cur);
+            if (cur && fs.existsSync(cur)) toOpen = cur;
+            else toOpen = saveDir;
+          }
+        } catch(e2) { toOpen = saveDir; }
+        const { spawn } = require('child_process');
+        try {
+          if (process.platform === 'win32') {
+            const isFile = (() => { try { return fs.statSync(toOpen).isFile(); } catch(e){ return false; } })();
+            if (isFile) spawn('explorer', ['/select,', toOpen], { detached: true, stdio: 'ignore' }).unref();
+            else spawn('explorer', [toOpen], { detached: true, stdio: 'ignore' }).unref();
+          } else if (process.platform === 'darwin') {
+            const isFile2 = (() => { try { return fs.statSync(toOpen).isFile(); } catch(e){ return false; } })();
+            if (isFile2) spawn('open', ['-R', toOpen], { detached: true, stdio: 'ignore' }).unref();
+            else spawn('open', [toOpen], { detached: true, stdio: 'ignore' }).unref();
+          } else {
+            const dir = (() => { try { return fs.statSync(toOpen).isFile() ? path.dirname(toOpen) : toOpen; } catch(e){ return toOpen; } })();
+            spawn('xdg-open', [dir], { detached: true, stdio: 'ignore' }).unref();
+          }
+          addLog('Reveal: ' + toOpen, 'info');
+        } catch(e3) {}
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ ok: true, path: toOpen }));
+      } catch(e) {
+        res.writeHead(400, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ error: e.message }));
+      }
+    });
+    return;
+  }
+
   if (req.method === 'POST' && pathname === '/upload') {
     const filename = decodeURIComponent(url.searchParams.get('name') || 'unnamed');
     const fileSize = parseInt(url.searchParams.get('size') || '0', 10);
-    const savePath = path.join(saveDir, filename.replace(/\//g, '\\'));
-    const dir = path.dirname(savePath);
+    const transferId = url.searchParams.get('transferId');
+
+    let foundTransfer = null;
+    if (transferId) {
+      for (const [_, list] of incomingTransfers) {
+        const t = list.find(x => x.id === transferId);
+        if (t) { foundTransfer = t; break; }
+      }
+    }
+
+    const targetDev = foundTransfer ? devices.get(foundTransfer.targetDeviceId) : null;
+    const isSendingToRemote = foundTransfer && targetDev && !targetDev.isHost;
+
+    let savePath;
+    if (isSendingToRemote) {
+      const transferDir = path.join(TRANSFERS_DIR, transferId);
+      if (!fs.existsSync(transferDir)) fs.mkdirSync(transferDir, { recursive: true });
+      savePath = path.join(transferDir, path.basename(filename));
+    } else {
+      savePath = path.join(saveDir, filename.replace(/\//g, '\\'));
+      const dir = path.dirname(savePath);
+      if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
+    }
 
     setImmediate(() => console.log('[UPLOAD] Receiving: ' + filename + ' (' + fmtBytes(fileSize) + ')'));
 
-    if (!fs.existsSync(dir)) {
-      fs.mkdirSync(dir, { recursive: true });
-    }
-
-    // High performance write stream: 256KB buffer, no fsync on every write
+    // High performance write stream: 512KB buffer, no fsync on every write
     const ws = fs.createWriteStream(savePath, {
       highWaterMark: 512 * 1024,
       flags: 'w'
     });
+    // Count body bytes per transfer so receivers can show live progress/speed.
+    if (foundTransfer) {
+      if (typeof foundTransfer.receivedBytes !== 'number') foundTransfer.receivedBytes = 0;
+      req.on('data', (chunk) => { foundTransfer.receivedBytes += chunk.length; });
+    }
     req.pipe(ws, { end: true });
 
     ws.on('finish', () => {
       const fsize = parseInt(url.searchParams.get('size') || '0', 10);
-      stats.saved++;
-      stats.savedBytes += fsize;
-      addLog('SAVED: ' + filename + ' (' + fmtBytes(fsize) + ')', 'saved', fsize);
+      if (!isSendingToRemote) {
+        stats.saved++;
+        stats.savedBytes += fsize;
+        addLog('SAVED: ' + filename + ' (' + fmtBytes(fsize) + ')', 'saved', fsize);
+      }
+      if (foundTransfer) {
+        if (!foundTransfer.uploadedFiles) foundTransfer.uploadedFiles = [];
+        foundTransfer.uploadedFiles.push({ name: filename, size: fsize });
+        if (foundTransfer.uploadedFiles.length >= (foundTransfer.files?.length || 0)) {
+          // Ensure 100% on completion even if chunk counting drifted
+          foundTransfer.receivedBytes = (foundTransfer.files || []).reduce((s,f)=>s+(f.size||0), 0);
+          foundTransfer.status = isSendingToRemote ? 'ready' : 'completed';
+          foundTransfer.completedAt = Date.now();
+          addLog('Transfer ' + (isSendingToRemote ? 'ready for download' : 'completed') + ': ' + foundTransfer.uploadedFiles.length + ' files', 'info');
+        }
+      }
       res.writeHead(200, { 'Content-Type': 'text/plain' });
       res.end('Saved: ' + filename);
     });
@@ -692,7 +1230,8 @@ function validateBrowserJS() {
   const vm = require('vm');
   const pages = [
     { name: 'senderHtml', html: senderHtmlFinal },
-    { name: 'statusHtml', html: statusHtml }
+    { name: 'statusHtml', html: statusHtml },
+    { name: 'devicesHtml', html: devicesHtmlFinal }
   ];
   for (const page of pages) {
     const s = page.html.indexOf('<script>') + 8;
@@ -722,7 +1261,7 @@ function validateBrowserJS() {
 
     // Check getElementById IDs exist in HTML
     const ids = [...js.matchAll(/getElementById\(['"](\w+)['"]\)/g)].map(m => m[1]);
-    const dynamicIds = ['pickerHint'];
+    const dynamicIds = ['pickerHint', 'renameBtn', 'clearSel'];
     const missing = ids.filter(id => !page.html.includes('id="' + id + '"') && !dynamicIds.includes(id));
     if (missing.length > 0) {
       console.error('[VALIDATE] WARNING: ' + page.name + ' has getElementById for missing IDs: ' + missing.join(', '));
@@ -743,13 +1282,26 @@ validateBrowserJS();
     socket.setKeepAlive(true, 60000);  // Keep connections alive
   });
 
+  const allIPs = getAllLocalIPs();
+
   httpsServer.listen(HTTPS_PORT, '0.0.0.0', () => {
     console.log('='.repeat(55));
-    console.log('HTTPS (use this): https://' + HOST_IP + ':' + HTTPS_PORT);
-    console.log('HTTP  (fallback): http://'  + HOST_IP + ':' + HTTP_PORT);
-    console.log('STATUS: https://' + HOST_IP + ':' + HTTPS_PORT + '/status');
-    console.log('SAVES TO: ' + saveDir);
-    console.log('NOTE: Accept the certificate warning on first open');
+    console.log('📱 CONNECTED DEVICES (PC & Mobile):');
+    console.log('   https://' + HOST_IP + ':' + HTTPS_PORT + '/devices-ui');
+    console.log('⚡ QUICK DIRECT UPLOAD:');
+    console.log('   https://' + HOST_IP + ':' + HTTPS_PORT + '/');
+    console.log('📊 STATUS DASHBOARD:');
+    console.log('   https://' + HOST_IP + ':' + HTTPS_PORT + '/status');
+    console.log('📂 SAVES TO: ' + saveDir);
+    if (allIPs.length > 1) {
+      console.log('Available network interfaces:');
+      allIPs.forEach(item => {
+        if (item.address !== HOST_IP) {
+          console.log('   https://' + item.address + ':' + HTTPS_PORT + '/devices-ui (' + item.name + ')');
+        }
+      });
+    }
+    console.log('NOTE: Accept the certificate warning on first visit');
     console.log('='.repeat(55));
     addLog('Server started (HTTPS:' + HTTPS_PORT + ' HTTP:' + HTTP_PORT + ')', 'info');
   });
@@ -762,7 +1314,7 @@ validateBrowserJS();
   });
 
   httpServer.listen(HTTP_PORT, '0.0.0.0', () => {
-    console.log('[HTTP] Also listening on http://' + HOST_IP + ':' + HTTP_PORT);
+    console.log('[HTTP] Fallback on http://' + HOST_IP + ':' + HTTP_PORT + '/devices-ui');
   });
 })();
 

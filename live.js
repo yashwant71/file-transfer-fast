@@ -5,7 +5,7 @@ window.onerror = function(msg, url, line) {
   if (progressWrap) progressWrap.classList.add('active');
   if (statusText) {
     statusText.innerHTML = 'JS ERROR: ' + msg + ' (line ' + line + ')';
-    statusText.style.color = '#f33';
+    statusText.style.color = '#fff';
   }
   console.error('JS ERROR:', msg, 'at line', line);
 };
@@ -95,10 +95,10 @@ dropZone.addEventListener('drop', e => {
       console.log('[DROP] ' + selectedFiles.length + ' files');
       updateFileList();
       statusText.textContent = selectedFiles.length + ' files ready to send' + (prefix ? ' to ' + prefix + '/' : '');
-      statusText.style.color = '#00e676';
+      statusText.style.color = '#fff';
     } else {
       statusText.textContent = 'No files found';
-      statusText.style.color = '#f33';
+      statusText.style.color = '#fff';
     }
   }
   function scanEntry(entry, base) {
@@ -133,7 +133,7 @@ function handleFileSelection(files) {
   if (selectedFiles.length > 5) console.log('... and ' + (selectedFiles.length - 5) + ' more files');
   updateFileList();
   statusText.textContent = selectedFiles.length + ' files ready to send';
-  statusText.style.color = '#00e676';
+  statusText.style.color = '#fff';
 }
 
 fileInput.addEventListener('change', () => handleFileSelection(fileInput.files));
@@ -291,7 +291,7 @@ async function sendFiles(files) {
 
     if (diff.missingCount === 0) {
       statusText.innerHTML = 'â All ' + allFileList.length + ' files already on server!';
-      statusText.style.color = '#00e676';
+      statusText.style.color = '#fff';
       sendBtn.disabled = false;
       return;
     }
@@ -346,10 +346,10 @@ async function sendFiles(files) {
   const elapsed = ((Date.now() - startTime) / 1000).toFixed(1);
   const avgSpeed = bytesTotal > 0 ? (bytesTotal / 1024 / 1024 / (Date.now() - startTime) * 1000).toFixed(1) : 0;
   statusText.innerHTML = 'â Done! ' + total + ' files sent (' + fmtGB(bytesTotal) + '), ' + elapsed + 's, ' + avgSpeed + ' MB/s<br>' +
-    '<span style="color:#0f0">Sent: ' + fmtGB(localSavedBytes) + '</span> &bull; ' +
-    '<span style="color:#ff0">Skipped: ' + fmtGB(localSkippedBytes) + '</span> &bull; ' +
-    '<span style="color:#f33">Failed: ' + fmtGB(localFailedBytes) + '</span>';
-  statusText.style.color = '#00e676';
+    '<span style="color:#fff">Sent: ' + fmtGB(localSavedBytes) + '</span> &bull; ' +
+    '<span style="color:#fff">Skipped: ' + fmtGB(localSkippedBytes) + '</span> &bull; ' +
+    '<span style="color:#fff">Failed: ' + fmtGB(localFailedBytes) + '</span>';
+  statusText.style.color = '#fff';
   barFill.style.width = '100%'; pctText.textContent = '100%';
 
   if (localFailed.length) {

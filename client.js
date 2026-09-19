@@ -10,7 +10,7 @@ window.onerror = function(msg, url, line) {
   if (progressWrap) progressWrap.classList.add('active');
   if (statusText) {
     statusText.innerHTML = 'JS ERROR: ' + msg + ' (line ' + line + ')';
-    statusText.style.color = '#f33';
+    statusText.style.color = '#fff';
   }
 };
 
@@ -50,7 +50,7 @@ var saveToLabel = document.getElementById('saveToLabel');
 
 // --- State ---
 var destPath = '';
-var saveDir = 'D:\\art';
+var saveDir = 'File Transfer';
 var selectedFiles = [];
 var transferAbort = null;
 var transferActive = false;
@@ -129,8 +129,8 @@ function initSkipPanel() {
   renderSkipTags();
 }
 
-// --- Destination root (localStorage) ---
-var savedDest = localStorage.getItem('destRoot');
+// --- Destination root + subpath (localStorage) ---
+var savedDest = null; try { savedDest = localStorage.getItem('destRoot'); } catch(e) {}
 if (savedDest) {
   saveDir = savedDest;
   fetch('/set-dest', {
@@ -139,19 +139,45 @@ if (savedDest) {
     body: JSON.stringify({ root: saveDir })
   }).catch(function() {});
 }
+try { var _dp = localStorage.getItem('ftDestPath') || localStorage.getItem('destPath'); if (_dp) destPath = _dp; } catch(e) {}
+function persistDest() {
+  try {
+    localStorage.setItem('ftDestPath', destPath);
+    localStorage.setItem('destPath', destPath);
+    if (saveDir) localStorage.setItem('destRoot', saveDir);
+  } catch(e) {}
+}
 
-// --- Stop / Resend ---
+// --- Stop / Send-more ---
 stopBtn.addEventListener('click', function() {
   if (transferAbort) transferAbort.abort();
   transferActive = false;
   stopBtn.style.display = 'none';
-  statusText.textContent = '\u23f9 Transfer stopped';
-  statusText.style.color = '#ff9800';
+  statusText.textContent = 'Stopped — hit Retry to continue with the same files.';
+  statusText.style.color = '#fff';
+  // allow retry with same selection
+  sendBtn.style.display = '';
+  sendBtn.disabled = selectedFiles.length ? false : true;
+  sendBtn.textContent = 'Retry Send';
 });
 
 resendBtn.addEventListener('click', function() {
+  // After a completed batch this button means "send another batch":
+  // clear the old selection so the user picks fresh files.
   resendBtn.style.display = 'none';
-  if (selectedFiles.length) startSend();
+  transferDone = false;
+  selectedFiles = [];
+  fileInfo.innerHTML = '<span style="color:#888">Pick files or a folder to send another batch.</span>';
+  var sub = document.getElementById('subfolderList');
+  if (sub) { sub.style.display = 'none'; sub.innerHTML = ''; }
+  progressWrap.classList.remove('active');
+  barFill.style.width = '0%';
+  pctText.textContent = '0%';
+  countText.textContent = '0 / 0';
+  statusText.textContent = '';
+  sendBtn.style.display = '';
+  sendBtn.textContent = 'Send';
+  sendBtn.disabled = true;
 });
 
 // --- Counts & logs ---
@@ -206,11 +232,29 @@ function addLocalSkipLog(msg, size, dedupKey) {
   addLog({ time: new Date().toLocaleTimeString(), msg: msg, type: 'skip', size: size, dedupKey: dedupKey });
 }
 
+function escHtml(s) {
+  return String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+}
+
+function fileIcon(name) {
+  var n = (name || '').toLowerCase();
+  if (/\.(jpg|jpeg|png|gif|webp|bmp|heic)$/.test(n)) return '🖼️';
+  if (/\.(mp4|mkv|mov|avi|webm)$/.test(n)) return '🎬';
+  if (/\.(mp3|wav|ogg|m4a|flac)$/.test(n)) return '🎵';
+  if (/\.(pdf)$/.test(n)) return '📕';
+  if (/\.(zip|rar|7z|tar|gz)$/.test(n)) return '📦';
+  return '📄';
+}
+
+var transferDone = false;
+
 function setFiles(files) {
+  if (transferActive) return;
   files.forEach(function(f) {
     if (!f._relativePath) f._relativePath = f.webkitRelativePath || f.name;
   });
   selectedFiles = files;
+  transferDone = false;
   var totalBytes = files.reduce(function(s, f) { return s + f.size; }, 0);
   var dest = destPath ? saveDir + '\\' + destPath.split('/').join('\\') : saveDir;
 
@@ -232,12 +276,71 @@ function setFiles(files) {
     savePreview += '\\' + topFiles[0];
   }
 
-  fileInfo.innerHTML = '<b>' + files.length + '</b> files, ~<b>' + fmtGB(totalBytes) + '</b>' +
-    '<br>\ud83d\udce5 <span style="color:#4fc3f7">' + savePreview + '</span>';
+  fileInfo.innerHTML = 'Selected: <b>' + files.length + '</b> file' + (files.length === 1 ? '' : 's') + ', ~<b>' + fmtGB(totalBytes) + '</b> — ready to send' +
+    '<br>To <span style="color:#fff">' + escHtml(savePreview) + '</span>' +
+    (files.length ? ' <a href="#" id="clearSel" style="color:#fff;font-size:.78rem;margin-left:.4rem">Clear</a>' : '');
+  var clearLink = document.getElementById('clearSel');
+  if (clearLink) {
+    clearLink.addEventListener('click', function(e) {
+      e.preventDefault();
+      if (transferActive) return;
+      selectedFiles = [];
+      fileInfo.textContent = '';
+      var sub = document.getElementById('subfolderList');
+      if (sub) { sub.style.display = 'none'; sub.innerHTML = ''; }
+      sendBtn.disabled = true;
+      sendBtn.style.display = '';
+      resendBtn.style.display = 'none';
+    });
+  }
+  renderSelectedPreview();
   stopBtn.style.display = 'none';
   transferActive = false;
-  resendBtn.style.display = '';
-  sendBtn.disabled = false;
+  // Fresh selection → show Send, hide "send more"
+  resendBtn.style.display = 'none';
+  sendBtn.style.display = '';
+  sendBtn.textContent = 'Send';
+  sendBtn.disabled = files.length ? false : true;
+}
+
+function renderSelectedPreview() {
+  var sub = document.getElementById('subfolderList');
+  if (!sub) return;
+  if (!selectedFiles.length || transferActive || transferDone) {
+    if (!transferDone) { sub.style.display = 'none'; sub.innerHTML = ''; }
+    return;
+  }
+  var MAX_ROWS = 150;
+  var html = '<div style="display:flex;justify-content:space-between;align-items:center;padding:.15rem .2rem .4rem;font-size:.8rem;color:#888">' +
+    '<span>' + selectedFiles.length + ' selected</span>' +
+    '<span style="color:#666">' + fmtGB(selectedFiles.reduce(function(s, f) { return s + f.size; }, 0)) + '</span></div>';
+  selectedFiles.slice(0, MAX_ROWS).forEach(function(f, idx) {
+    var rel = f._relativePath || f.name;
+    html += '<div style="display:flex;align-items:center;gap:.5rem;padding:.3rem .4rem;border-bottom:1px solid #222;font-size:.78rem">' +
+      '<span>' + fileIcon(rel) + '</span>' +
+      '<span style="flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:#ddd" title="' + escHtml(rel) + '">' + escHtml(rel) + '</span>' +
+      '<span style="color:#888;white-space:nowrap">' + fmtGB(f.size) + '</span>' +
+      '<button data-rmsel="' + idx + '" style="background:none;border:none;color:#fff;cursor:pointer;font-size:.85rem">✕</button></div>';
+  });
+  if (selectedFiles.length > MAX_ROWS) {
+    html += '<div style="padding:.4rem;text-align:center;color:#666;font-size:.78rem">… + ' + (selectedFiles.length - MAX_ROWS) + ' more (all will be sent)</div>';
+  }
+  sub.innerHTML = html;
+  sub.style.display = 'block';
+  sub.querySelectorAll('[data-rmsel]').forEach(function(btn) {
+    btn.addEventListener('click', function() {
+      if (transferActive) return;
+      var i = parseInt(btn.getAttribute('data-rmsel'), 10);
+      selectedFiles.splice(i, 1);
+      if (!selectedFiles.length) {
+        fileInfo.textContent = '';
+        sub.style.display = 'none'; sub.innerHTML = '';
+        sendBtn.disabled = true;
+      } else {
+        setFiles(selectedFiles);
+      }
+    });
+  });
 }
 
 // --- Drag & drop ---
@@ -406,7 +509,7 @@ dbUseBtn.addEventListener('click', function() {
       destPath = normCurrent.slice(normSave.length + 1);
     } else {
       statusText.textContent = 'Use "Set as Root" first to save to a different drive.';
-      statusText.style.color = '#ff0';
+      statusText.style.color = '#fff';
       progressWrap.classList.add('active');
       setTimeout(function() { progressWrap.classList.remove('active'); }, 3000);
       return;
@@ -418,7 +521,7 @@ dbUseBtn.addEventListener('click', function() {
   if (destPath) { displayParts.push(destPath.split('/').join('\\')); }
   var display = displayParts.join('\\') + (destPath ? '' : ' (root)');
   destLabel.textContent = display;
-  localStorage.setItem('destRoot', saveDir);
+  persistDest();
   destBrowser.classList.remove('active');
 });
 
@@ -433,21 +536,22 @@ dbRootBtn.addEventListener('click', async function() {
     var result = await resp.json();
     if (result.root) {
       saveDir = result.root;
-      localStorage.setItem('destRoot', saveDir);
+      persistDest();
       destPath = '';
+      try { localStorage.setItem('ftDestPath', ''); localStorage.setItem('destPath', ''); } catch(e) {}
       destLabel.textContent = saveDir + ' (root)';
       if (saveToLabel) saveToLabel.textContent = 'Saves to ' + saveDir + ' \u2022 smart folder skip';
       addLocalSkipLog('Destination root changed to: ' + saveDir, 0);
       destBrowser.classList.remove('active');
     } else {
       statusText.textContent = 'Error: ' + (result.error || 'Unknown');
-      statusText.style.color = '#f33';
+      statusText.style.color = '#fff';
       progressWrap.classList.add('active');
       setTimeout(function() { progressWrap.classList.remove('active'); }, 3000);
     }
   } catch(e) {
     statusText.textContent = 'Error changing root: ' + e.message;
-    statusText.style.color = '#f33';
+    statusText.style.color = '#fff';
     progressWrap.classList.add('active');
     setTimeout(function() { progressWrap.classList.remove('active'); }, 3000);
   }
@@ -480,7 +584,9 @@ async function fetchLogs() {
     }
   } catch(e) {}
 }
-setInterval(fetchLogs, 1000);
+// Pause log polling while uploading: frees a browser connection slot
+// (HTTP/1.1 allows ~6 per host) and CPU for the transfer itself.
+setInterval(function() { if (!transferActive) fetchLogs(); }, 1000);
 initSkipPanel();
 
 // Init dest label from server
@@ -498,7 +604,7 @@ initSkipPanel();
 
 // --- Send files ---
 async function sendFiles(files) {
-  sendBtn.disabled = true;
+  sendBtn.style.display = 'none';
   stopBtn.style.display = '';
   resendBtn.style.display = 'none';
   retryBtn.disabled = true;
@@ -534,9 +640,17 @@ async function sendFiles(files) {
       addLocalSkipLog('SKIP: ' + existCount + ' files already on server (' + fmtGB(skippedBytes) + ')', skippedBytes, 'diff-skip');
     }
     if (diff.missingCount === 0) {
-      statusText.innerHTML = '\u2705 All ' + allFileList.length + ' files already on server!';
-      statusText.style.color = '#00e676';
-      sendBtn.disabled = false;
+      statusText.innerHTML = '✅ All ' + allFileList.length + ' files already on server!';
+      statusText.style.color = '#fff';
+      stopBtn.style.display = 'none';
+      transferActive = false;
+      transferDone = true;
+      // Nothing to send → hide Send, offer next batch
+      sendBtn.style.display = 'none';
+      resendBtn.style.display = '';
+      resendBtn.textContent = 'Send more';
+      var sub0 = document.getElementById('subfolderList');
+      if (sub0) { sub0.style.display = 'none'; sub0.innerHTML = ''; }
       return;
     }
     statusText.textContent = diff.missingCount + ' files to send (' + fmtGB(missingSize) + ')...';
@@ -556,18 +670,85 @@ async function sendFiles(files) {
   var bytesTotal = missingFiles.reduce(function(s, f) { return s + f.size; }, 0);
   var bytesSent = 0;
   var startTime = Date.now();
+  var lastTickBytes = 0;
+  var lastTickTime = Date.now();
+  var peakBps = 0;
   localFailed = [];
 
+  function fmtSpeed(bps) {
+    if (!isFinite(bps) || bps < 0) bps = 0;
+    if (bps >= 1048576) return (bps / 1048576).toFixed(1) + ' MB/s';
+    if (bps >= 1024) return Math.round(bps / 1024) + ' KB/s';
+    return Math.round(bps) + ' B/s';
+  }
+
+  // Live bytes = finished files + in-flight progress (fetch has no
+  // upload-progress events, so uploads below use XHR instead).
+  function liveBytes() {
+    var live = bytesSent;
+    for (var li = 0; li < missingFiles.length; li++) live += (missingFiles[li]._loaded || 0);
+    if (live > bytesTotal) live = bytesTotal;
+    return live;
+  }
+
   function updateUI() {
-    var pct = total > 0 ? Math.round((bytesSent / bytesTotal) * 100) : 0;
+    var live = liveBytes();
+    var pct = bytesTotal > 0 ? Math.round((live / bytesTotal) * 100) : 0;
+    if (pct > 100) pct = 100;
     barFill.style.width = pct + '%';
     pctText.textContent = pct + '%';
     countText.textContent = completed + ' / ' + total;
-    var elapsed = (Date.now() - startTime) / 1000;
-    if (elapsed > 0.5) speedText.textContent = (bytesSent / 1024 / 1024 / elapsed).toFixed(1) + ' MB/s';
+    var now = Date.now();
+    var elapsed = (now - startTime) / 1000;
+    var tickDt = (now - lastTickTime) / 1000;
+    var inst = tickDt > 0 ? (live - lastTickBytes) / tickDt : 0;
+    if (inst < 0) inst = 0;
+    var avg = elapsed > 0 ? live / elapsed : 0;
+    // Prefer instantaneous speed while moving; fall back to average when idle.
+    var show = (live < bytesTotal && inst > 0) ? inst : avg;
+    if (show > peakBps) peakBps = show;
+    if (elapsed > 0.2 || completed === total) speedText.textContent = fmtSpeed(show);
+    lastTickBytes = live;
+    lastTickTime = now;
   }
 
-  var CONCURRENCY = 3;
+  var uiTimer = setInterval(function() { if (transferActive) updateUI(); }, 250);
+
+  // XHR upload with real upload-progress (fetch can't report it,
+  // which is why speed used to stick at 0 until a file finished).
+  function uploadFileXHR(url, file, item) {
+    return new Promise(function(resolve, reject) {
+      var xhr = new XMLHttpRequest();
+      xhr.open('POST', url, true);
+      if (transferAbort) {
+        transferAbort.signal.addEventListener('abort', function() { try { xhr.abort(); } catch(e) {} });
+      }
+      xhr.upload.onprogress = function(e) {
+        if (e.lengthComputable) {
+          item._loaded = e.loaded;
+        } else {
+          item._loaded = 0;
+        }
+      };
+      xhr.onload = function() {
+        if (xhr.status >= 200 && xhr.status < 300) resolve(xhr.responseText);
+        else {
+          var err = new Error('HTTP ' + xhr.status);
+          err.status = xhr.status;
+          reject(err);
+        }
+      };
+      xhr.onerror = function() { reject(new Error('Network error')); };
+      xhr.onabort = function() {
+        var err = new Error('Aborted');
+        err.name = 'AbortError';
+        reject(err);
+      };
+      try { xhr.send(file); } catch(e) { reject(e); }
+    });
+  }
+
+  var CONCURRENCY = 6;
   var MAX_CONCURRENCY = 12;
   var activeWorkers = 0;
   var idx = 0;
@@ -593,26 +774,27 @@ async function sendFiles(files) {
     while (idx < missingFiles.length) {
       if (!transferActive) return;
       var item = missingFiles[idx++];
+      item._loaded = 0;
       try {
-        var resp = await fetch('/upload?name=' + encodeURIComponent(item.name) + '&size=' + item.size, {
-          method: 'POST', body: item._file, signal: transferAbort.signal
-        });
-        var result = await resp.text();
+        var upUrl = '/upload?name=' + encodeURIComponent(item.name) + '&size=' + item.size;
+        var result = await uploadFileXHR(upUrl, item._file, item);
+        item._loaded = 0;
         completed++;
         bytesSent += item.size;
         var now = Date.now();
 
-        // Speed check every 3 seconds
+        // Speed check every 3 seconds (uses live bytes incl. in-flight)
         if (now - lastSpeedCheck > 3000) {
-          var recentBytes = bytesSent - lastSpeedBytes;
-          var recentSpeed = recentBytes / 1024 / 1024 / ((now - lastSpeedCheck) / 1000);
-          lastSpeedBytes = bytesSent;
+          var liveNow = liveBytes();
+          var recentBytes = liveNow - lastSpeedBytes;
+          var recentSpeed = recentBytes / ((now - lastSpeedCheck) / 1000);
+          lastSpeedBytes = liveNow;
           lastSpeedCheck = now;
 
           // If speed dropped below 500 KB/s, boost concurrency
-          if (recentSpeed < 0.5 && activeWorkers < MAX_CONCURRENCY) {
+          if (recentSpeed < 0.5 * 1024 * 1024 && activeWorkers < MAX_CONCURRENCY) {
             CONCURRENCY = Math.min(CONCURRENCY + 4, MAX_CONCURRENCY);
-            allLogs.push({ time: new Date().toLocaleTimeString(), msg: 'Slow speed (' + recentSpeed.toFixed(1) + ' MB/s), boosting to ' + CONCURRENCY + ' workers', type: 'info', size: 0, dedupKey: '' });
+            allLogs.push({ time: new Date().toLocaleTimeString(), msg: 'Slow speed (' + fmtSpeed(recentSpeed) + '), boosting to ' + CONCURRENCY + ' workers', type: 'info', size: 0, dedupKey: '' });
             renderLogs();
             // Spawn extra workers immediately
             for (var i = 0; i < 4 && activeWorkers < CONCURRENCY; i++) spawnWorker();
@@ -624,29 +806,34 @@ async function sendFiles(files) {
           lastUIUpdate = now;
         }
       } catch(err) {
+        item._loaded = 0;
         if (err.name === 'AbortError') {
-          statusText.textContent = '\u23f9 Transfer stopped';
-          statusText.style.color = '#ff9800';
+          statusText.textContent = 'Stopped — hit Retry to continue with the same files.';
+          statusText.style.color = '#fff';
           stopBtn.style.display = 'none';
           transferActive = false;
-          resendBtn.style.display = '';
+          try { clearInterval(uiTimer); } catch(e) {}
+          sendBtn.style.display = '';
           sendBtn.disabled = false;
+          sendBtn.textContent = 'Retry Send';
           return;
         }
         // Server down / network error — stop everything
         if (err instanceof TypeError && !transferActive) return;
         if (err instanceof TypeError) {
           transferActive = false;
+          try { clearInterval(uiTimer); } catch(e) {}
           CONCURRENCY = 0;
-          statusText.innerHTML = '\u274c Server unreachable! Check if server is running.<br>' + completed + ' / ' + total + ' sent before disconnect.';
-          statusText.style.color = '#f33';
+          statusText.innerHTML = 'Server unreachable. Check if server is running.<br>' + completed + ' / ' + total + ' sent before disconnect.';
+          statusText.style.color = '#fff';
           stopBtn.style.display = 'none';
-          resendBtn.style.display = '';
+          sendBtn.style.display = '';
           sendBtn.disabled = false;
+          sendBtn.textContent = 'Retry Send';
           return;
         }
         // Retry once for network errors
-        if (err.name === 'TypeError' && !item._retried) {
+        if ((err.message === 'Network error' || err.name === 'TypeError') && !item._retried) {
           item._retried = true;
           idx--; // re-queue
           return;
@@ -659,15 +846,8 @@ async function sendFiles(files) {
     }
   }
 
-  // Spawn workers gradually — one every 300ms, checks cap each time
-  function spawnGradual() {
-    if (!transferActive || idx >= missingFiles.length) return;
-    if (activeWorkers < CONCURRENCY) spawnWorker();
-    if (idx < missingFiles.length && transferActive) {
-      setTimeout(spawnGradual, 300);
-    }
-  }
-  spawnGradual();
+  // Start all workers immediately for max throughput
+  for (var w = 0; w < CONCURRENCY; w++) spawnWorker();
   // Wait until all items are picked up and all workers finish
   await new Promise(function(resolve) {
     var check = setInterval(function() {
@@ -675,17 +855,23 @@ async function sendFiles(files) {
     }, 100);
   });
 
+  try { clearInterval(uiTimer); } catch(e) {}
+  if (!transferActive) return; // stopped or disconnected — keep that message
+  updateUI();
   var elapsed = ((Date.now() - startTime) / 1000).toFixed(1);
-  var avgSpeed = elapsed > 0 ? (bytesSent / 1024 / 1024 / (Date.now() - startTime) * 1000).toFixed(1) : 0;
-  statusText.innerHTML = '\u2705 Done! ' + completed + ' files processed (' + elapsed + 's, ' + avgSpeed + ' MB/s)<br>' +
-    '<span style="color:#0f0">Sent: ' + fmtGB(bytesSent) + '</span> &bull; ' +
-    '<span style="color:#ff0">Skipped: ' + fmtGB(localSkippedBytes) + '</span> &bull; ' +
-    '<span style="color:#f33">Failed: ' + fmtGB(localFailedBytes) + '</span>';
-  statusText.style.color = '#00e676';
+  var avgBps = bytesSent / ((Date.now() - startTime) / 1000 || 1);
+  var avgSpeed = fmtSpeed(avgBps);
+  speedText.textContent = avgSpeed;
+  statusText.innerHTML = 'Done. ' + completed + ' files processed (' + elapsed + 's, avg ' + avgSpeed + ', peak ' + fmtSpeed(peakBps) + ')<br>' +
+    '<span style="color:#fff">Sent: ' + fmtGB(bytesSent) + '</span> &bull; ' +
+    '<span style="color:#fff">Skipped: ' + fmtGB(localSkippedBytes) + '</span> &bull; ' +
+    '<span style="color:#fff">Failed: ' + fmtGB(localFailedBytes) + '</span>';
+  statusText.style.color = '#fff';
   barFill.style.width = '100%';
   pctText.textContent = '100%';
   stopBtn.style.display = 'none';
   transferActive = false;
+  transferDone = true;
 
   if (localFailed.length) {
     failedWrap.classList.add('active');
@@ -693,11 +879,19 @@ async function sendFiles(files) {
     retryBtn.disabled = false;
     retryBtn.onclick = function() {
       failedWrap.classList.remove('active');
+      transferDone = false;
+      sendBtn.style.display = '';
       sendFiles(localFailed.map(function(f) { return f.file; }));
     };
   }
+  // Batch done → hide Send for good, show "Send more" to start a fresh batch.
+  sendBtn.style.display = 'none';
   resendBtn.style.display = '';
-  sendBtn.disabled = false;
+  resendBtn.textContent = 'Send more';
+  var subDone = document.getElementById('subfolderList');
+  if (subDone) { subDone.style.display = 'none'; subDone.innerHTML = ''; }
+  fileInfo.innerHTML = '<b>' + completed + ' files</b> processed — pick “Send more files” for the next batch.' +
+    '<br>To <span style="color:#fff">' + escHtml(destPath ? (saveDir + '\\' + destPath.split('/').join('\\')) : (saveDir + ' (root)')) + '</span>';
 }
 
 sendBtn.addEventListener('click', function() {
