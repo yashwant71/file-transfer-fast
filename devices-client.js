@@ -59,8 +59,12 @@ var transferAbort = null;
 var saveRoot = '';
 var destPath = (function(){ try{ return localStorage.getItem('ftDestPath') || localStorage.getItem('destPath') || ''; }catch(e){ return ''; } })();
 var sbCurrentAbs = '';
-var history = []; // unified: {key,dir,peer,count,size,status,live,speed,peak,path,names,transferId,time,_lastB,_lastT,_t0}
+var history = (function(){ try{ const v=localStorage.getItem('ftHistory'); if(v) return JSON.parse(v); }catch(e){} return []; })(); // unified: {key,dir,peer,count,size,status,live,speed,peak,path,names,transferId,time,_lastB,_lastT,_t0}
 var knownRecv = {};
+// keep last picked files for retry where left (session only, File blobs not persistable across reload)
+var lastPickedFiles = null;
+var lastPickedTarget = null;
+function saveHistory(){ try{ const slim=history.slice(0,30).map(e=>({key:e.key,dir:e.dir,peer:e.peer,count:e.count,size:e.size,status:e.status,path:e.path,realPath:e.realPath,names:e.names,transferId:e.transferId,time:e.time})); localStorage.setItem('ftHistory', JSON.stringify(slim)); }catch(e){} }
 // This device's own receive location. Host saves to disk (server path);
 // other devices auto-save via browser download or a picked folder (File System Access).
 var phoneAuto = true; // always on — no toggle needed
@@ -101,6 +105,7 @@ function saveRealPath() {
   if (destPath) return saveRoot + '\\' + destPath.split('/').join('\\');
   return saveRoot || '';
 }
+function clientLog(m){ try{ console.log('[SEND] '+m); fetch('/client-log',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({device:myDeviceName, msg:m})}).catch(()=>{});}catch(e){} }
 // Show PC browser controls on host, folder picker elsewhere (if supported).
 function updateSaveRow() {
   var host = isHostDevice;
@@ -271,18 +276,19 @@ function setPicked(files) {
   readySummary.textContent = files.length + ' selected (' + fmtGB(bytes) + ') — hits Send and this panel closes; watch it below.';
   pickerStep.style.display = 'none';
   readyStep.style.display = '';
+  clientLog('picked ' + files.length + ' files ' + fmtGB(bytes) + ' for ' + (devices.find(x=>x.id===selectedDeviceId)?.name||selectedDeviceId));
 }
 
 // --- Unified history ---
 function statusLabel(e) {
   // Row-2 left: live speed while moving, plain state word when settled.
   if (e.dir === 'up') {
-    if (e.status === 'sending') return fmtSpeed(e.speed);
+    if (e.status === 'sending') return e.live === 0 ? 'Starting…' : fmtSpeed(e.speed);
     if (e.status === 'done') return 'Sent';
     if (e.status === 'stopped') return 'Stopped';
     return 'Sending';
   }
-  if (e.status === 'receiving') return fmtSpeed(e.speed);
+  if (e.status === 'receiving') return e.live === 0 ? 'Waiting for sender…' : fmtSpeed(e.speed);
   if (e.status === 'ready') return (e.savedToFolder || e.savedToDownloads) ? 'Saved' : 'Tap Get';
   if (e.status === 'done') return 'Received';
   return e.status;
@@ -295,6 +301,8 @@ function renderHistory() {
     var el = document.createElement('div');
     el.className = 'h';
     var active = (e.status === 'sending' || e.status === 'receiving');
+    // Show waiting instead of 0 B/s when nothing has arrived yet
+    if (e.status === 'receiving' && e.live === 0) e._waiting = (e._waiting || 0) + 1;
     // Row 1: badge + file name (ellipsis) … size + count. Tap row to reveal in folder (on host).
     var canReveal = isHostDevice && e.path && (e.status === 'done' || e.status === 'ready') && e.transferId;
     var title = e.count > 1
@@ -302,14 +310,15 @@ function renderHistory() {
       : escHtml((e.names || [])[0] || 'files');
     var sizeTxt = fmtGB(e.size) + ' · ' + e.count + (e.count === 1 ? ' file' : ' files');
     // Row 2: speed-or-state … peer + folder path.
-    var arrow = e.dir === 'up' ? '↑' : '↓';
-    var dest = arrow + ' ' + e.peer + (e.path ? ' · ' + e.path : '');
-    var arrowWhite = '<span style="color:#fff;font-weight:800;font-size:18px">' + escHtml(arrow) + '</span>';
-    var destHtml = arrowWhite + ' ' + escHtml(e.peer) + (e.path ? ' <span style="color:#888">·</span> ' + escHtml(e.path) : '');
+    var dirSvg = e.dir === 'up'
+      ? '<svg viewBox="0 0 24 24" width="18" height="18" fill="white" style="display:block"><path d="M12 4 L6 12 H9 V20 H15 V12 H18 Z"/></svg>'
+      : '<svg viewBox="0 0 24 24" width="18" height="18" fill="white" style="display:block"><path d="M12 20 L18 12 H15 V4 H9 V12 H6 Z"/></svg>';
+    var dirWord = e.dir === 'up' ? 'to' : 'from';
+    var destHtml = escHtml(dirWord) + ' ' + escHtml(e.peer) + (e.path ? ' <span style="color:#888">·</span> ' + escHtml(e.path) : '');
     var html =
-      '<div class="l1"' + (canReveal ? ' data-reveal="' + escHtml(e.transferId) + '" data-name="' + escHtml((e.names||[])[0]||e.files&&e.files[0]&&e.files[0].name||'') + '" style="cursor:pointer" title="Show in folder"' : '') + '><span class="dir" title="' + (e.dir==='up'?'Upload':'Download') + '">' + (e.dir === 'up' ? '↑' : '↓') + '</span>' +
+      '<div class="l1"' + (canReveal ? ' data-reveal="' + escHtml(e.transferId) + '" data-name="' + escHtml((e.names||[])[0]||e.files&&e.files[0]&&e.files[0].name||'') + '" style="cursor:pointer" title="Show in folder"' : '') + '><span class="dir" title="' + (e.dir==='up'?'Upload':'Download') + '">' + dirSvg + '</span>' +
       '<span class="nm">' + title + '</span>' +
-      '<span class="sz">' + sizeTxt + '</span></div>' +
+      '<span class="sz">' + sizeTxt + '</span><button data-dismiss="' + escHtml(e.key) + '" style="margin-left:auto;background:none;border:none;color:#666;cursor:pointer;font-size:18px;line-height:1" title="Dismiss">×</button></div>' +
       '<div class="l2"><span class="sp">' + escHtml(statusLabel(e)) + '</span>' +
       (e.path
         ? '<span class="pp"' + (canReveal ? ' data-reveal="' + escHtml(e.transferId) + '" data-name="' + escHtml((e.names||[])[0]||e.files&&e.files[0]&&e.files[0].name||'') + '" style="cursor:pointer;text-decoration:underline" title="Show in folder"' : ' data-copy="' + escHtml(e.path) + '" title="tap to copy"') + '>' + destHtml + '</span>'
@@ -338,10 +347,31 @@ function renderHistory() {
     el.innerHTML = html;
     histList.appendChild(el);
   });
+  try{ saveHistory(); }catch(e){}
+}
+function dismissHistory(key) {
+  const idx = history.findIndex(x => x.key === key);
+  if (idx >= 0) {
+    const e = history[idx];
+    // tell server to drop it so it doesn't come back on next poll
+    if (e.transferId && e.dir === 'down') {
+      fetch('/ack-transfer', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({ deviceId: myDeviceId, transferId: e.transferId, action: 'reject' }) }).catch(()=>{});
+    }
+    history.splice(idx, 1);
+    renderHistory();
+  }
 }
 document.addEventListener('click', function(ev) {
   var t = ev.target;
   if (!t || !t.getAttribute) return;
+  var dm = t.getAttribute('data-dismiss');
+  if (dm) { dismissHistory(dm); ev.stopPropagation(); return; }
+  var p2 = t.parentElement;
+  while (p2 && p2 !== histList) {
+    const pd = p2.getAttribute && p2.getAttribute('data-dismiss');
+    if (pd) { dismissHistory(pd); return; }
+    p2 = p2.parentElement;
+  }
   var rv = t.getAttribute('data-reveal');
   if (rv) {
     var nm = t.getAttribute('data-name') || '';
@@ -452,6 +482,7 @@ async function startSend() {
   if (history.length > 30) history.pop();
   hideSendPanel(); // picker gone the moment Send is hit; progress lives below
   renderHistory();
+  clientLog('queueing ' + list.length + ' files ' + fmtGB(entry.size) + ' to ' + entry.peer + (entry.path?' @ '+entry.path:''));
   var sentBytes = 0, completed = 0, startTime = Date.now();
   var bytesTotal = entry.size;
 
@@ -473,6 +504,37 @@ async function startSend() {
 
   function spawn(conn) {
     var active = 0, idx = 0;
+    async function one(item) {
+      if (!transferActive) return;
+      for (let attempt = 0; attempt < 2; attempt++) {
+        if (!transferActive) return;
+        try {
+          clientLog('single start '+item.name+' '+fmtGB(item._file.size));
+          var url = '/upload?name=' + encodeURIComponent(item.name) + '&size=' + item.size +
+            (entry.transferId ? '&transferId=' + encodeURIComponent(entry.transferId) : '');
+          await uploadFileXHR(url, item._file, function(ld) { item._loaded = ld; });
+          clientLog('single ok '+item.name+' '+fmtGB(item._file.size));
+          item._loaded = 0; completed++; sentBytes += item.size;
+          entry.live = Math.min(sentBytes, bytesTotal);
+          tick();
+          return;
+        } catch(err) {
+          clientLog('single fail '+item.name+' '+ (err.message||err) + ' status='+(err.status||'') + ' attempt='+attempt);
+          item._loaded = 0;
+          if (err.name === 'AbortError') { transferActive = false; throw err; }
+          const retriable = (err.message === 'Network error' || err.name === 'TypeError' || /Network/.test(err.message) || err.status >= 500);
+          if (retriable && attempt === 0) {
+            clientLog('single retry '+item.name);
+            await new Promise(r => setTimeout(r, 700));
+            continue;
+          }
+          completed++; sentBytes += item.size;
+          entry._failed = (entry._failed || 0) + 1;
+          tick();
+          return;
+        }
+      }
+    }
     return new Promise(function(done) {
       function next() {
         if (!transferActive) return fin();
@@ -490,96 +552,6 @@ async function startSend() {
       fin._t = setInterval(function() { if (idx >= list.length && active === 0) fin(); }, 100);
       next();
     });
-    const CHUNK_SIZE = 8 * 1024 * 1024;
-    const CHUNK_THRESHOLD = 16 * 1024 * 1024;
-    async function one(item) {
-      if (!transferActive) return;
-      // Large single file: split into 8MB chunks, 4 parallel (biggest win for 300MB)
-      if (item._file.size > CHUNK_THRESHOLD) {
-        const totalChunks = Math.ceil(item._file.size / CHUNK_SIZE);
-        let chunkLoaded = new Array(totalChunks).fill(0);
-        const updateLoaded = () => { item._loaded = chunkLoaded.reduce((a,b)=>a+b, 0); };
-        let nextIdx = 0;
-        let active = 0;
-        const MAX_PAR = 4;
-        try {
-          await new Promise((resolve, reject) => {
-            let done = 0;
-            let failedErr = null;
-            function launch() {
-              if (failedErr) return;
-              while (active < MAX_PAR && nextIdx < totalChunks && !failedErr) {
-                const ci = nextIdx++;
-                const start = ci * CHUNK_SIZE;
-                const end = Math.min(start + CHUNK_SIZE, item._file.size);
-                const slice = item._file.slice(start, end);
-                active++;
-                (async () => {
-                  for (let ca=0; ca<2; ca++) {
-                    if (!transferActive) { failedErr = new Error('Aborted'); failedErr.name='AbortError'; reject(failedErr); return; }
-                    try {
-                      const curl = '/upload?name=' + encodeURIComponent(item.name) + '&size=' + item.size + (entry.transferId ? '&transferId=' + encodeURIComponent(entry.transferId) : '') + '&chunkIndex=' + ci + '&totalChunks=' + totalChunks;
-                      await uploadFileXHR(curl, slice, (ld) => { chunkLoaded[ci]=ld; updateLoaded(); });
-                      break;
-                    } catch(e) {
-                      if (e.name==='AbortError') { failedErr=e; reject(e); return; }
-                      const retriable = (e.message==='Network error' || e.name==='TypeError' || /Network/.test(e.message) || e.status>=500);
-                      if (retriable && ca===0) { await new Promise(r=>setTimeout(r,700)); continue; }
-                      failedErr=e; reject(e); return;
-                    }
-                  }
-                  // mark this chunk as fully uploaded for progress
-                  const isLast = ci===totalChunks-1;
-                  const expected = isLast ? (item._file.size - ci*CHUNK_SIZE) : CHUNK_SIZE;
-                  chunkLoaded[ci]=expected;
-                  updateLoaded();
-                  active--;
-                  done++;
-                  if (done===totalChunks) resolve();
-                  else launch();
-                })();
-              }
-            }
-            launch();
-          });
-          item._loaded = 0; completed++; sentBytes += item.size;
-          entry.live = Math.min(sentBytes, bytesTotal);
-          tick();
-          return;
-        } catch(err) {
-          item._loaded = 0;
-          if (err.name==='AbortError') { transferActive=false; throw err; }
-          completed++; sentBytes += item.size;
-          entry._failed = (entry._failed||0)+1;
-          tick();
-          return;
-        }
-      }
-      for (let attempt = 0; attempt < 2; attempt++) {
-        if (!transferActive) return;
-        try {
-          var url = '/upload?name=' + encodeURIComponent(item.name) + '&size=' + item.size +
-            (entry.transferId ? '&transferId=' + encodeURIComponent(entry.transferId) : '');
-          await uploadFileXHR(url, item._file, function(ld) { item._loaded = ld; });
-          item._loaded = 0; completed++; sentBytes += item.size;
-          entry.live = Math.min(sentBytes, bytesTotal);
-          tick();
-          return;
-        } catch(err) {
-          item._loaded = 0;
-          if (err.name === 'AbortError') { transferActive = false; throw err; }
-          const retriable = (err.message === 'Network error' || err.name === 'TypeError' || /Network/.test(err.message) || err.status >= 500);
-          if (retriable && attempt === 0) {
-            await new Promise(r => setTimeout(r, 700));
-            continue;
-          }
-          completed++; sentBytes += item.size;
-          entry._failed = (entry._failed || 0) + 1;
-          tick();
-          return;
-        }
-      }
-    }
   }
 
   try {
@@ -593,11 +565,15 @@ async function startSend() {
     var res = await resp.json();
     if (!res.success) throw new Error(res.error || 'start failed');
     entry.transferId = res.transferId;
+    clientLog('queued id=' + entry.transferId + ' status=' + res.status);
     // Server auto-accepts — upload starts immediately, no waiting.
     entry.status = 'sending';
     renderHistory();
+    clientLog('spawn start ' + list.length + ' files, 6 par, chunked=' + list.some(x=>x._file.size>16*1024*1024));
     await spawn(6);
+    clientLog('spawn done ok=' + completed + '/' + list.length + ' failed=' + (entry._failed||0));
   } catch(e) {
+    clientLog('queue/upload error: ' + (e.message||e));
     entry.status = 'stopped';
     try { clearInterval(uiTimer); } catch(err) {}
     transferActive = false;
@@ -714,33 +690,34 @@ async function pollIncoming() {
 
 // --- Save location ---
 async function loadSaveRoot() {
-  // Restore previously chosen PC folder (survives page reload / server restart)
+  // Fetch current server root first, then only POST if stored differs (avoids spamming DEST CHANGED)
+  var serverRoot = null;
+  try {
+    var r0 = await fetch('/dest-root');
+    var d0 = await r0.json();
+    if (d0.root) serverRoot = d0.root;
+  } catch(e) {}
   var storedRoot = null;
   try { storedRoot = localStorage.getItem('destRoot'); } catch(e) {}
-  if (storedRoot && storedRoot !== saveRoot) {
+  if (storedRoot && serverRoot && storedRoot !== serverRoot) {
     try {
       await fetch('/set-dest', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ root: storedRoot }) });
+      serverRoot = storedRoot;
     } catch(e) {}
   }
-  try {
-    var r = await fetch('/dest-root');
-    var d = await r.json();
-    if (d.root) {
-      saveRoot = d.root;
-      try { localStorage.setItem('destRoot', saveRoot); } catch(e) {}
-      // Validate stored destPath still makes sense; if not under current root, it will be recreated on next upload — keep it.
+  if (serverRoot) {
+    saveRoot = serverRoot;
+    try { localStorage.setItem('destRoot', saveRoot); } catch(e) {}
+    refreshSave();
+    var storedPath = null;
+    try { storedPath = localStorage.getItem('ftDestPath') || localStorage.getItem('destPath'); } catch(e) {}
+    if (storedPath !== null && storedPath !== destPath) {
+      destPath = storedPath;
+      try { localStorage.setItem('ftDestPath', destPath); } catch(e) {}
       refreshSave();
-      // after root is known, re-apply stored subpath display
-      var storedPath = null;
-      try { storedPath = localStorage.getItem('ftDestPath') || localStorage.getItem('destPath'); } catch(e) {}
-      if (storedPath !== null && storedPath !== destPath) {
-        destPath = storedPath;
-        try { localStorage.setItem('ftDestPath', destPath); } catch(e) {}
-        refreshSave();
-      }
-      renderHistory();
     }
-  } catch(e) {}
+    renderHistory();
+  }
 }
 function persistDest() {
   try {

@@ -1,0 +1,19 @@
+a single live site which acts as wrapper not as sharer
+in that 
+
+if someone goes he will be asked to either upload file or send to device
+
+if does send to device that will redirect to our app and
+ it will start with this code of file transfer that we get a local
+sever url and that url that app will send along with if anyone has connected to it
+to our live site
+
+in live site same we can open in other device and that other device will because is on same hotspot/wife
+we will be able to know using our app and app will tell to live site
+
+now we will see that url in live site and will open it also here in other device
+once we are running on both device we can start sending from app but 
+
+our live site is wrapper so there we will see the options to uplaod download and status 
+like we see on app
+

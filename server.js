@@ -96,6 +96,13 @@ function registerDevice(deviceInfo) {
   const id = deviceInfo.id || generateId();
   const now = Date.now();
   const isHost = deviceInfo.isHost || false;
+  const existing = devices.get(id);
+  if (existing) {
+    existing.lastSeen = now;
+    existing.name = deviceInfo.name || existing.name;
+    existing.ip = deviceInfo.ip || existing.ip;
+    return id;
+  }
   devices.set(id, {
     id,
     name: deviceInfo.name || (isHost ? 'Host PC' : 'Device'),
@@ -107,6 +114,8 @@ function registerDevice(deviceInfo) {
     registeredAt: now
   });
   addLog('Device connected: ' + devices.get(id).name + ' (' + devices.get(id).ip + ')', 'info');
+  // push live so other browsers see it without Refresh
+  try { sseBroadcast(); } catch(e) {}
   return id;
 }
 
@@ -115,6 +124,7 @@ function unregisterDevice(id) {
   if (device) {
     addLog('Device disconnected: ' + device.name, 'info');
     devices.delete(id);
+    try { sseBroadcast(); } catch(e) {}
   }
 }
 
@@ -142,6 +152,32 @@ function generateId() {
   return 'dev_' + Math.random().toString(36).substr(2, 9) + Date.now().toString(36);
 }
 
+// --- SSE live push ---
+const sseClients = new Set();
+function sseBroadcast() {
+  const payload = JSON.stringify({ devices: getActiveDevices(), ts: Date.now() });
+  for (const res of sseClients) {
+    try { res.write(`data: ${payload}\n\n`); } catch(e) {}
+  }
+}
+function sseBroadcastTransfers() {
+  // Notify all clients that transfers may have changed — they will re-fetch /incoming
+  const payload = JSON.stringify({ transfersTick: Date.now() });
+  for (const res of sseClients) {
+    try { res.write(`event: transfers\ndata: ${payload}\n\n`); } catch(e) {}
+  }
+}
+setInterval(() => {
+  // keep-alive + also push current device list so “No other devices” clears without Refresh
+  for (const res of sseClients) {
+    try { res.write(`: ping\n\n`); } catch(e) {}
+  }
+  // prune stale devices and push if any were removed
+  const before = devices.size;
+  getActiveDevices();
+  if (devices.size !== before) sseBroadcast();
+}, 15000);
+
 const incomingTransfers = new Map();
 
 function queueIncomingTransfer(targetDeviceId, transfer) {
@@ -159,6 +195,7 @@ function queueIncomingTransfer(targetDeviceId, transfer) {
     completedAt: 0
   };
   incomingTransfers.get(targetDeviceId).push(t);
+  try { sseBroadcastTransfers(); } catch(e) {}
   return t;
 }
 
@@ -499,7 +536,7 @@ const devicesHtml = `<!DOCTYPE html>
     #sbBar { display: flex; gap: 8px; padding: 8px; }
     .h { padding: 8px 0; border-bottom: 1px solid #222; }
     .h .l1 { display: flex; gap: 8px; align-items: baseline; }
-    .dir { font-size: 20px; font-weight: 800; color: #fff; width: 24px; text-align: center; line-height: 1; background: #333; border-radius: 4px; display: inline-flex; align-items: center; justify-content: center; }
+    .dir { font-size: 22px; font-weight: 900; color: #fff; width: 26px; height: 26px; text-align: center; line-height: 1; background: #222; border: 1px solid #333; border-radius: 50%; display: inline-flex; align-items: center; justify-content: center; }
     .h .nm { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-weight: 600; }
     .h .sz { font-size: 12px; color: #888; white-space: nowrap; }
     .h .l2 { display: flex; justify-content: space-between; gap: 8px; margin-top: 2px; }
@@ -526,7 +563,7 @@ const devicesHtml = `<!DOCTYPE html>
 <div class="wrap">
   <div class="top">
     <div><b>File Share</b> <span class="dim" id="selfInfo">…</span></div>
-    <div><a href="/">Upload</a> &nbsp;<button id="refreshBtn">Refresh</button></div>
+    <div><a href="/">Upload</a> &nbsp;<button type="button" id="refreshBtn">Refresh</button></div>
   </div>
 
   <div class="sec">Devices</div>
@@ -536,12 +573,12 @@ const devicesHtml = `<!DOCTYPE html>
     <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px"><b id="targetDeviceName">Send</b></div>
     <div id="dropZone">
       <div id="pickerStep" class="row">
-        <button class="ghost" id="selectFolderBtn">Folder</button>
-        <button class="ghost" id="selectFilesBtn">Files</button>
+        <button type="button" class="ghost" id="selectFolderBtn">Folder</button>
+        <button type="button" class="ghost" id="selectFilesBtn">Files</button>
       </div>
       <div id="readyStep" style="display:none">
         <div id="readySummary" class="dim" style="margin-bottom:8px"></div>
-        <button class="btn" id="sendBtn" style="width:100%">Send</button>
+        <button type="button" class="btn" id="sendBtn" style="width:100%">Send</button>
       </div>
       <input type="file" id="folderInput" webkitdirectory multiple style="opacity:0;position:absolute;width:0;height:0">
       <input type="file" id="fileInput" multiple style="opacity:0;position:absolute;width:0;height:0">
@@ -552,15 +589,15 @@ const devicesHtml = `<!DOCTYPE html>
   <div id="saveRow">
     <span class="dim">Save to</span>
     <span id="saveLabel" style="cursor:pointer;text-decoration:underline;text-underline-offset:2px" title="Show in folder">…</span>
-    <button class="link" id="saveChangeBtn">Change</button>
-    <button class="link" id="saveFolderBtn" style="display:none">Folder</button>
+    <button type="button" class="link" id="saveChangeBtn">Change</button>
+    <button type="button" class="link" id="saveFolderBtn" style="display:none">Folder</button>
   </div>
   <div id="saveBrowser" style="display:none">
     <div id="sbCrumb"></div>
     <div id="sbList"></div>
     <div id="sbBar">
-      <button class="btn" id="sbUseBtn" style="flex:1">Use folder</button>
-      <button class="ghost" id="sbCancelBtn">Cancel</button>
+      <button type="button" class="btn" id="sbUseBtn" style="flex:1">Use folder</button>
+      <button type="button" class="ghost" id="sbCancelBtn">Cancel</button>
     </div>
   </div>
   <div id="histList"></div>
@@ -610,25 +647,47 @@ const requestHandler = (req, res) => {
       res.end(JSON.stringify({ status: 'ready' })); return;
     }
     if (pathname === '/drives') {
+      // wmic is removed on Win 11 24H2 — use PowerShell/CIM, fallback to fs scan
       try {
         const { execSync } = require('child_process');
-        const out = execSync('wmic logicaldisk get DeviceID,VolumeName,FreeSpace,Size /format:csv', { encoding: 'utf8', timeout: 5000 });
-        const lines = out.split('\n').filter(l => l.trim() && !l.startsWith('Node'));
+        let out = '';
+        try {
+          out = execSync('powershell -NoProfile -Command "Get-CimInstance Win32_LogicalDisk | Select-Object DeviceID,VolumeName,FreeSpace,Size | ConvertTo-Csv -NoTypeInformation"', { encoding: 'utf8', timeout: 5000, stdio: ['ignore','pipe','ignore'] });
+        } catch(e) {
+          out = execSync('powershell -NoProfile -Command "Get-PSDrive -PSProvider FileSystem | Select-Object @{N=\\"DeviceID\\";E={$_.Root.TrimEnd(\\"\\\\\\")}},@{N=\\"VolumeName\\";E={""}},@{N=\\"FreeSpace\\";E={$_.Free}},@{N=\\"Size\\";E={$_.Used + $_.Free}} | ConvertTo-Csv -NoTypeInformation"', { encoding: 'utf8', timeout: 5000, stdio: ['ignore','pipe','ignore'] });
+        }
+        const lines = out.split('\n').filter(l => l.trim() && !l.includes('DeviceID') && !l.startsWith('"Node"'));
         const drives = lines.map(l => {
-          const parts = l.trim().split(',');
-          if (parts.length < 5) return null;
-          return { letter: parts[1], name: parts[2] || '', free: parseInt(parts[3]) || 0, total: parseInt(parts[4]) || 0 };
-        }).filter(Boolean);
-        res.writeHead(200, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' });
-        res.end(JSON.stringify(drives));
+          // CSV: "C:","","123","456" or C:,Vol,Free,Size
+          const parts = l.split(',').map(s => s.replace(/^"|"$/g,'').trim());
+          if (parts.length < 4) return null;
+          const letter = parts[0].replace(':','') + ':';
+          return { letter, name: parts[1] || '', free: parseInt(parts[2]) || 0, total: parseInt(parts[3]) || 0 };
+        }).filter(Boolean).filter(d => { try { return fs.existsSync(d.letter + '\\'); } catch(e){ return false; }});
+        if (drives.length) {
+          res.writeHead(200, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' });
+          res.end(JSON.stringify(drives));
+          return;
+        }
+        throw new Error('no drives from CIM');
       } catch(e) {
-        // fallback: try common drives
+        // final fallback: scan A-Z, try statfs for free/total when available
         const drives = [];
-        for (const d of ['C','D','E','F','G']) {
-          try { if (fs.existsSync(d + ':\\')) drives.push({ letter: d + ':', name: '', free: 0, total: 0 }); } catch(e2) {}
+        for (let code=65; code<=90; code++) {
+          const letter = String.fromCharCode(code) + ':';
+          try {
+            if (!fs.existsSync(letter + '\\')) continue;
+            let free=0, total=0;
+            try {
+              const st = fs.statfsSync(letter + '\\');
+              free = Number(st.bfree) * Number(st.bsize);
+              total = Number(st.blocks) * Number(st.bsize);
+            } catch(e2) {}
+            drives.push({ letter, name: '', free, total });
+          } catch(e2) {}
         }
         res.writeHead(200, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' });
-        res.end(JSON.stringify(drives));
+        res.end(JSON.stringify(drives.length?drives:[{letter:'C:',name:'',free:0,total:0}]));
       }
       return;
     }
@@ -639,6 +698,19 @@ const requestHandler = (req, res) => {
     if (pathname === '/devices') {
       res.writeHead(200, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' });
       res.end(JSON.stringify(getActiveDevices())); return;
+    }
+    if (pathname === '/events') {
+      res.writeHead(200, {
+        'Content-Type': 'text/event-stream',
+        'Cache-Control': 'no-cache',
+        'Connection': 'keep-alive',
+        'Access-Control-Allow-Origin': '*'
+      });
+      // send initial snapshot
+      try { res.write(`data: ${JSON.stringify({ devices: getActiveDevices() })}\n\n`); } catch(e) {}
+      sseClients.add(res);
+      req.on('close', () => { try { sseClients.delete(res); } catch(e) {} });
+      return;
     }
     if (pathname === '/incoming') {
       const deviceId = url.searchParams.get('deviceId');
@@ -841,23 +913,34 @@ const requestHandler = (req, res) => {
         const { targetDeviceId, files, senderId } = JSON.parse(body || '{}');
         const targetDevice = devices.get(targetDeviceId);
         if (!targetDevice) {
+          addLog('QUEUE FAIL: target ' + targetDeviceId + ' not found', 'error');
+          console.log('[QUEUE] FAIL target not found:', targetDeviceId);
           res.writeHead(404, { 'Content-Type': 'application/json' });
           res.end(JSON.stringify({ error: 'Target device not found' }));
           return;
         }
         const senderDevice = devices.get(senderId);
+        const total = (files || []).reduce((s, f) => s + (f.size || 0), 0);
         const transfer = queueIncomingTransfer(targetDeviceId, {
           senderId,
           senderName: senderDevice ? senderDevice.name : 'Unknown Device',
           targetDeviceId,
           targetDeviceName: targetDevice.name,
           files: files || [],
-          totalSize: (files || []).reduce((s, f) => s + (f.size || 0), 0)
+          totalSize: total
         });
-        addLog('Transfer queued: ' + (senderDevice?.name || 'Device') + ' -> ' + targetDevice.name + ' (' + (files?.length || 0) + ' files)', 'info');
+        const logLine = 'Transfer queued: ' + (senderDevice?.name || 'Device') + ' (' + cleanIP(senderDevice?.ip||'') + ') -> ' + targetDevice.name + ' (' + cleanIP(targetDevice.ip) + ') id=' + transfer.id + ' ' + (files?.length||0) + ' files ' + fmtBytes(total) + ' status=' + transfer.status;
+        addLog(logLine, 'info');
+        console.log('[QUEUE] ' + logLine);
+        if (files && files.length) {
+          files.slice(0,5).forEach(f=> console.log('  file:', f.name, fmtBytes(f.size)));
+          if (files.length>5) console.log('  ... +' + (files.length-5) + ' more');
+        }
         res.writeHead(200, { 'Content-Type': 'application/json' });
         res.end(JSON.stringify({ success: true, transferId: transfer.id, status: transfer.status }));
       } catch(e) {
+        addLog('QUEUE ERROR: ' + e.message, 'error');
+        console.log('[QUEUE] ERROR', e.message);
         res.writeHead(400, { 'Content-Type': 'application/json' });
         res.end(JSON.stringify({ error: e.message }));
       }
@@ -876,6 +959,7 @@ const requestHandler = (req, res) => {
         if (transfer) {
           transfer.status = action === 'accept' ? 'accepted' : 'rejected';
           addLog('Transfer ' + action + ': ' + transfer.senderName + ' -> ' + (devices.get(deviceId)?.name || deviceId), 'info');
+          try { sseBroadcastTransfers(); } catch(e) {}
         }
         res.writeHead(200, { 'Content-Type': 'application/json' });
         res.end(JSON.stringify({ success: true, status: transfer ? transfer.status : 'unknown' }));
@@ -885,6 +969,13 @@ const requestHandler = (req, res) => {
       }
     });
     return;
+  }
+
+  if (req.method === 'POST' && pathname === '/client-log') {
+    let body=''; req.on('data',c=>body+=c); req.on('end',()=>{
+      try{ const j=JSON.parse(body||'{}'); console.log('[CLIENT ' + (j.device||'?') + '] ' + (j.msg||body).slice(0,500)); }catch(e){ console.log('[CLIENT] ' + body.slice(0,500)); }
+      res.writeHead(200); res.end('ok');
+    }); return;
   }
 
   if (req.method === 'POST' && pathname === '/set-dest') {
@@ -908,6 +999,11 @@ const requestHandler = (req, res) => {
         if (!stat.isDirectory()) {
           res.writeHead(400, { 'Content-Type': 'application/json' });
           res.end(JSON.stringify({ error: 'Not a directory' }));
+          return;
+        }
+        if (saveDir === resolved) {
+          res.writeHead(200, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ root: saveDir }));
           return;
         }
         saveDir = resolved;
@@ -1161,123 +1257,6 @@ const requestHandler = (req, res) => {
       req.on('data', (chunk) => { foundTransfer.receivedBytes += chunk.length; });
     }
 
-    // --- Chunked upload for large single files (>16MB split into 8MB) ---
-    const chunkIndexRaw = url.searchParams.get('chunkIndex');
-    const totalChunksRaw = url.searchParams.get('totalChunks');
-    const isChunked = chunkIndexRaw !== null && totalChunksRaw !== null;
-    if (isChunked) {
-      const chunkIndex = parseInt(chunkIndexRaw, 10);
-      const totalChunks = parseInt(totalChunksRaw, 10);
-      if (Number.isNaN(chunkIndex) || Number.isNaN(totalChunks) || chunkIndex < 0 || chunkIndex >= totalChunks || totalChunks > 500 || totalChunks < 2) {
-        res.writeHead(400); res.end('Invalid chunk'); return;
-      }
-      // Allow chunked without transferId (quick upload) — use filename as key
-      const effectiveId = String(transferId || ('quick_' + Buffer.from(filename).toString('base64url').slice(0,12)));
-      if (!foundTransfer && transferId) { res.writeHead(404); res.end('Transfer not found'); return; }
-      // Use temp chunks dir under os.tmpdir (safer than TRANSFERS_DIR for partials)
-      const chunksBase = path.join(os.tmpdir(), 'ft-chunks', effectiveId);
-      try { if (!fs.existsSync(chunksBase)) fs.mkdirSync(chunksBase, { recursive: true }); } catch(e) {}
-      const safeKey = Buffer.from(filename).toString('base64url');
-      const chunkPath = path.join(chunksBase, safeKey + '.' + chunkIndex + '.part');
-      let chunkDone = false;
-      let chunkFailed = false;
-      const cws = fs.createWriteStream(chunkPath, { flags: 'w', highWaterMark: 512*1024 });
-      function failChunk(code, msg) {
-        if (chunkFailed || chunkDone) return;
-        chunkFailed = true;
-        try { cws.destroy(); } catch(e) {}
-        try { fs.unlinkSync(chunkPath); } catch(e) {}
-        if (!res.headersSent) { res.writeHead(code); res.end(msg); }
-      }
-      cws.on('error', (e) => failChunk(500, 'Chunk write error'));
-      req.on('error', (e) => failChunk(500, 'Chunk req error'));
-      req.on('aborted', () => failChunk(499, 'Aborted'));
-      req.pipe(cws);
-      cws.on('finish', async () => {
-        if (chunkFailed) return;
-        chunkDone = true;
-        // Check if all chunks for this file are present
-        let allPresent = true;
-        for (let i = 0; i < totalChunks; i++) {
-          if (!fs.existsSync(path.join(chunksBase, safeKey + '.' + i + '.part'))) { allPresent = false; break; }
-        }
-        if (!allPresent) {
-          if (!res.headersSent) { res.writeHead(200); res.end('Chunk ' + chunkIndex + ' ok'); }
-          return;
-        }
-        // Prevent double assembly when last chunks finish concurrently
-        if (!foundTransfer._assembling) foundTransfer._assembling = new Set();
-        if (foundTransfer._assembling.has(safeKey)) {
-          if (!res.headersSent) { res.writeHead(200); res.end('Chunk ' + chunkIndex + ' ok (already assembling)'); }
-          return;
-        }
-        foundTransfer._assembling.add(safeKey);
-        // All chunks present — assemble into final destination
-        let finalPath;
-        if (isSendingToRemote) {
-          const transferDir = path.join(TRANSFERS_DIR, transferId);
-          try { if (!fs.existsSync(transferDir)) fs.mkdirSync(transferDir, { recursive: true }); } catch(e) {}
-          finalPath = path.join(transferDir, path.basename(filename));
-        } else {
-          finalPath = path.join(saveDir, filename.replace(/\//g, '\\'));
-          const dir = path.dirname(finalPath);
-          try { if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true }); } catch(e) {}
-        }
-        try {
-          // Assemble atomically: write to temp then rename
-          const tmpFinal = finalPath + '.assembling';
-          const out = fs.createWriteStream(tmpFinal, { flags: 'w', highWaterMark: 1024*1024 });
-          for (let i = 0; i < totalChunks; i++) {
-            const part = path.join(chunksBase, safeKey + '.' + i + '.part');
-            await new Promise((res2, rej2) => {
-              const inp = fs.createReadStream(part, { highWaterMark: 1024*1024 });
-              inp.on('error', rej2);
-              inp.pipe(out, { end: false });
-              inp.on('end', res2);
-            });
-          }
-          await new Promise(res2 => out.end(res2));
-          // Verify size (allow small drift)
-          try {
-            const st = fs.statSync(tmpFinal);
-            if (Math.abs(st.size - fileSize) > 1024 && fileSize > 0) {
-              // size mismatch — still keep but log
-              console.log('[CHUNK] size mismatch for ' + filename + ': got ' + st.size + ' expect ' + fileSize);
-            }
-          } catch(e) {}
-          try { if (fs.existsSync(finalPath)) fs.unlinkSync(finalPath); } catch(e) {}
-          fs.renameSync(tmpFinal, finalPath);
-          // Cleanup chunks for this file
-          for (let i = 0; i < totalChunks; i++) { try { fs.unlinkSync(path.join(chunksBase, safeKey + '.' + i + '.part')); } catch(e) {} }
-          try { if (fs.readdirSync(chunksBase).length === 0) fs.rmdirSync(chunksBase); } catch(e) {}
-          try { const p2 = path.join(os.tmpdir(), 'ft-chunks', effectiveId); if (fs.existsSync(p2) && fs.readdirSync(p2).length === 0) fs.rmdirSync(p2); } catch(e) {}
-          // Mark transfer progress as complete for this file
-          if (!isSendingToRemote) { stats.saved++; stats.savedBytes += fileSize; addLog('SAVED: ' + filename + ' (' + fmtBytes(fileSize) + ')', 'saved', fileSize); }
-          if (foundTransfer) {
-            if (!foundTransfer.uploadedFiles) foundTransfer.uploadedFiles = [];
-            const at = foundTransfer.uploadedFiles.findIndex(x => x.name === filename);
-            if (at >= 0) foundTransfer.uploadedFiles[at] = { name: filename, size: fileSize };
-            else foundTransfer.uploadedFiles.push({ name: filename, size: fileSize });
-            const uniq = new Set(foundTransfer.uploadedFiles.map(x => x.name)).size;
-            const needed = (foundTransfer.files || []).length;
-            if (uniq >= needed) {
-              foundTransfer.receivedBytes = (foundTransfer.files || []).reduce((s,f)=>s+(f.size||0),0);
-              foundTransfer.status = isSendingToRemote ? 'ready' : 'completed';
-              foundTransfer.completedAt = Date.now();
-              addLog('Transfer ' + (isSendingToRemote ? 'ready for download' : 'completed') + ': ' + uniq + '/' + needed + ' files', 'info');
-            }
-          }
-          try { if (foundTransfer._assembling) foundTransfer._assembling.delete(safeKey); } catch(e) {}
-          if (!res.headersSent) { res.writeHead(200); res.end('Saved: ' + filename); }
-        } catch(e) {
-          try { if (foundTransfer._assembling) foundTransfer._assembling.delete(safeKey); } catch(e2) {}
-          try { fs.unlinkSync(finalPath + '.assembling'); } catch(e2) {}
-          if (!res.headersSent) { res.writeHead(500); res.end('Assemble error: ' + e.message); }
-        }
-      });
-      return;
-    }
-
     // --- Single (non-chunked) upload ---
     let savePath;
     if (isSendingToRemote) {
@@ -1334,6 +1313,13 @@ const requestHandler = (req, res) => {
           foundTransfer.status = isSendingToRemote ? 'ready' : 'completed';
           foundTransfer.completedAt = Date.now();
           addLog('Transfer ' + (isSendingToRemote ? 'ready for download' : 'completed') + ': ' + uniq + '/' + needed + ' files', 'info');
+          try { sseBroadcastTransfers(); } catch(e) {}
+          try { sseBroadcastTransfers(); } catch(e) {}
+          try { sseBroadcastTransfers(); } catch(e) {}
+          try { sseBroadcastTransfers(); } catch(e) {}
+          try { sseBroadcastTransfers(); } catch(e) {}
+          try { sseBroadcastTransfers(); } catch(e) {}
+          try { sseBroadcastTransfers(); } catch(e) {}
         }
       }
       if (!res.headersSent) { res.writeHead(200, { 'Content-Type': 'text/plain' }); res.end('Saved: ' + filename); }
@@ -1351,14 +1337,11 @@ const requestHandler = (req, res) => {
       failOnce(fsize, 'WRITE ERROR: ' + err.message, 500);
     });
 
-    // Aborted: clean partial file. 'close' is too noisy (fires on normal success before ws finish),
-    // so we only handle 'aborted' explicitly and let the 400ms delayed check handle true drops.
+    // Clean partial file on abort/close — do not send 499 here (would race with normal finish)
     req.on('aborted', () => {
       if (uploadDone || uploadFailed) return;
-      uploadFailed = true;
       try { ws.destroy(); } catch(e) {}
       try { fs.unlinkSync(savePath); } catch(e) {}
-      if (!res.headersSent) { try { res.writeHead(499); res.end('Client aborted'); } catch(e) {} }
     });
     req.on('close', () => {
       if (uploadDone || uploadFailed) return;
@@ -1372,7 +1355,6 @@ const requestHandler = (req, res) => {
             if (expect > 0 && st.size < expect) {
               try { ws.destroy(); } catch(e) {}
               try { fs.unlinkSync(savePath); } catch(e) {}
-              if (!res.headersSent) { try { res.writeHead(499); res.end('Closed'); } catch(e) {} }
             }
           }
         } catch(e) {}
