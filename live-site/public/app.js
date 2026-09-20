@@ -167,35 +167,45 @@
   }
 
   // Network-isolated discovery
-  const HEARTBEAT_WINDOW_MS = 15000; // 15 seconds validity window
+  const CLOUD_RELAYS = [
+    'https://ntfy.envs.net',
+    'https://ntfy.sh'
+  ];
+  const HEARTBEAT_WINDOW_MS = 35000; // 35 seconds validity window
 
   async function discoverHost() {
     await resolvePublicIp();
     const topic = networkTopic || 'ftf-net-default';
 
-    try {
-      const resp = await fetch('https://ntfy.sh/' + topic + '/json?poll=1&since=1m', { cache: 'no-store' });
-      if (resp.ok) {
-        const text = await resp.text();
-        const lines = text.trim().split('\n').filter(Boolean);
-        // Look at the latest message
-        for (let i = lines.length - 1; i >= 0; i--) {
-          try {
-            const item = JSON.parse(lines[i]);
-            if (item.event === 'message' && item.message) {
-              const data = JSON.parse(item.message);
-              const now = Date.now();
-              const age = now - (data.timestamp || 0);
+    for (const relay of CLOUD_RELAYS) {
+      try {
+        const resp = await fetch(relay + '/' + topic + '/json?poll=1&since=2m', {
+          cache: 'no-store',
+          signal: AbortSignal.timeout(3000)
+        });
+        if (resp.ok) {
+          const text = await resp.text();
+          const lines = text.trim().split('\n').filter(Boolean);
+          // Look at the latest message
+          for (let i = lines.length - 1; i >= 0; i--) {
+            try {
+              const item = JSON.parse(lines[i]);
+              if (item.event === 'message' && item.message) {
+                const data = JSON.parse(item.message);
+                const now = Date.now();
+                const age = now - (data.timestamp || 0);
 
-              if (data.active === true && data.hostIp && age >= 0 && age < HEARTBEAT_WINDOW_MS) {
-                displayHostFound(data.hostIp, data.httpPort || 8001, data.deviceName || 'Host PC');
-                return;
+                if (data.active === true && data.hostIp && age >= 0 && age < HEARTBEAT_WINDOW_MS) {
+                  console.log('[DISCOVERY] Active host found on', relay, ':', data.hostIp);
+                  displayHostFound(data.hostIp, data.httpPort || 8001, data.deviceName || 'Host PC');
+                  return;
+                }
               }
-            }
-          } catch(e) {}
+            } catch(e) {}
+          }
         }
-      }
-    } catch(e) {}
+      } catch(e) {}
+    }
 
     // No active host found on this network
     showFindState('no_host');

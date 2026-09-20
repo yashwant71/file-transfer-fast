@@ -1738,6 +1738,11 @@ validateBrowserJS();
     return 'ftf-net-' + (ip || 'default').replace(/[^a-zA-Z0-9]/g, '_');
   }
 
+  const CLOUD_RELAYS = [
+    'https://ntfy.envs.net',
+    'https://ntfy.sh'
+  ];
+
   async function announceToLiveWrapper(isActive = true) {
     const pubIp = await getPublicIp();
     const topic = getNetworkTopic(pubIp);
@@ -1754,35 +1759,47 @@ validateBrowserJS();
       timestamp: isActive ? Date.now() : 0
     };
 
-    // 1. Publish to Network-Isolated Cloud Relay (ntfy.sh)
-    try {
-      await fetch('https://ntfy.sh/' + topic, {
-        method: 'POST',
-        headers: { 'Title': 'FileTransfer Host Heartbeat' },
-        body: JSON.stringify(payload)
-      });
-      if (isActive && !announcedOnce) {
-        announcedOnce = true;
-        console.log(`[CLOUD-LOBBY] Network lobby active on topic: ${topic}`);
-        console.log(`[CLOUD-LOBBY] Live heartbeat: http://${HOST_IP}:${HTTP_PORT}/devices-ui`);
-      }
-    } catch (e) {}
+    const bodyStr = JSON.stringify(payload);
+    let publishedRelay = null;
 
-    // 2. Publish to Vercel endpoint
+    // Publish to relays with automatic failover
+    for (const relay of CLOUD_RELAYS) {
+      try {
+        const res = await fetch(relay + '/' + topic, {
+          method: 'POST',
+          headers: { 'Title': 'FileTransfer Host Heartbeat' },
+          body: bodyStr,
+          signal: AbortSignal.timeout(3000)
+        });
+        if (res.ok) {
+          publishedRelay = relay;
+          break;
+        }
+      } catch (e) {}
+    }
+
+    if (isActive && !announcedOnce) {
+      announcedOnce = true;
+      console.log(`[CLOUD-LOBBY] Network lobby active on topic: ${topic} (${publishedRelay || 'relays'})`);
+      console.log(`[CLOUD-LOBBY] Live heartbeat: http://${HOST_IP}:${HTTP_PORT}/devices-ui`);
+    }
+
+    // 2. Publish to Vercel endpoint if configured
     if (LIVE_WRAPPER_URL) {
       try {
         await fetch(`${LIVE_WRAPPER_URL.replace(/\/$/, '')}/api/announce`, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify(payload)
+          body: bodyStr,
+          signal: AbortSignal.timeout(3000)
         });
       } catch (err) {}
     }
   }
 
-  // Send live heartbeat every 3.5 seconds while engine is running
+  // Send live heartbeat every 12 seconds while engine is running
   announceToLiveWrapper(true);
-  const heartbeatTimer = setInterval(() => announceToLiveWrapper(true), 3500);
+  const heartbeatTimer = setInterval(() => announceToLiveWrapper(true), 12000);
 
   // Clean shutdown: mark host offline in cloud lobby immediately
   async function markOffline() {
@@ -1791,11 +1808,16 @@ validateBrowserJS();
       const pubIp = cachedPublicIp || await getPublicIp();
       const topic = getNetworkTopic(pubIp);
       const data = JSON.stringify({ active: false, hostIp: HOST_IP, timestamp: 0 });
-      await fetch('https://ntfy.sh/' + topic, {
-        method: 'POST',
-        headers: { 'Title': 'FileTransfer Host Offline' },
-        body: data
-      });
+      for (const relay of CLOUD_RELAYS) {
+        try {
+          await fetch(relay + '/' + topic, {
+            method: 'POST',
+            headers: { 'Title': 'FileTransfer Host Offline' },
+            body: data,
+            signal: AbortSignal.timeout(2000)
+          });
+        } catch(e) {}
+      }
     } catch(e) {}
   }
 
