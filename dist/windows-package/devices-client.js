@@ -48,6 +48,22 @@ function getFriendlyName() {
 }
 var myDeviceName = getFriendlyName();
 localStorage.setItem('myDeviceName', myDeviceName);
+// Self-declared host — no IP guessing. ?role=host pins it, ?role=guest clears it,
+// localhost defaults to host, everything else defaults to guest.
+var amIHost = (function() {
+  try {
+    var q = new URLSearchParams(location.search);
+    var r = q.get('role');
+    if (r === 'host') { try { localStorage.setItem('ftIsHost', '1'); } catch(e) {} return true; }
+    if (r === 'guest') { try { localStorage.setItem('ftIsHost', '0'); } catch(e) {} return false; }
+    var stored = null;
+    try { stored = localStorage.getItem('ftIsHost'); } catch(e) {}
+    if (stored === '1') return true;
+    if (stored === '0') return false;
+    var h = location.hostname || '';
+    return h === 'localhost' || h === '127.0.0.1';
+  } catch(e) { return false; }
+})();
 
 // --- State ---
 var devices = [];
@@ -120,12 +136,12 @@ async function registerDevice() {
     var resp = await fetch('/register', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ id: myDeviceId, name: myDeviceName, userAgent: navigator.userAgent || '', capabilities: ['send', 'receive'] })
+      body: JSON.stringify({ id: myDeviceId, name: myDeviceName, isHost: amIHost, userAgent: navigator.userAgent || '', capabilities: ['send', 'receive'] })
     });
     if (!resp.ok) return;
     var data = await resp.json();
     if (data.id) { myDeviceId = data.id; localStorage.setItem('myDeviceId', myDeviceId); }
-    isHostDevice = !!data.isHost;
+    isHostDevice = !!data.isHost || amIHost;
     devices = data.devices || [];
     renderDevices();
     updateSaveRow();
@@ -141,36 +157,56 @@ async function fetchDevices() {
     var resp = await fetch('/devices');
     if (!resp.ok) return;
     devices = await resp.json();
+    var meRec = devices.find(function(d) { return d.id === myDeviceId; });
+    if (meRec) isHostDevice = !!meRec.isHost;
     renderDevices();
   } catch(e) {}
 }
 function renderDevices() {
-  var other = devices.filter(function(d) { return d.id !== myDeviceId && d.online !== false; });
-  var me = devices.find(function(d) { return d.id === myDeviceId; });
-  if (me) {
-    selfInfo.textContent = me.name + ' (' + me.ip + ')' + (me.isHost ? ' · host' : '');
-  }
+  // Show ALL available devices as simplified single-row items. No IP, no second line.
+  // Self is always first with a "you" tag (plus "host" if it declared itself host).
+  var online = devices.filter(function(d) { return d.online !== false; });
+  var me = online.find(function(d) { return d.id === myDeviceId; });
+  var others = online.filter(function(d) { return d.id !== myDeviceId; });
+  var list = me ? [me].concat(others) : others;
+  var meName = me ? me.name : myDeviceName;
+  var meHost = me ? !!me.isHost : amIHost;
+  if (selfInfo) selfInfo.textContent = meName + (meHost ? ' · host' : '') + ' · you';
   deviceList.innerHTML = '';
-  if (!other.length) {
-    deviceList.innerHTML = '<div class="empty">No other devices yet — open this page on another device on the same Wi-Fi.</div>';
+  if (!list.length) {
+    deviceList.innerHTML = '<div class="empty">No devices yet — open this page on another device on the same Wi-Fi.</div>';
     return;
   }
-  other.forEach(function(d) {
-    var isOpen = selectedDeviceId === d.id && sendPanel.style.display !== 'none';
-    var label = isOpen ? 'Cancel' : 'Send';
-    var cls = isOpen ? 'ghost' : 'btn';
-    var dis = transferActive ? ' disabled' : '';
+  list.forEach(function(d) {
+    var isMe = d.id === myDeviceId;
+    var badge = (isMe ? ' · you' : '') + (d.isHost ? ' · host' : '');
     var row = document.createElement('div');
     row.className = 'dev';
-    row.innerHTML =
-      '<div class="nm"><b>' + escHtml(d.name) + (d.isHost ? ' <span class="dim">· host</span>' : '') + '</b>' +
-      '<div class="ip">' + escHtml(d.ip) + '</div></div>' +
-      '<button class="' + cls + '" data-dev="' + d.id + '"' + dis + '>' + label + '</button>';
+    if (isMe) {
+      row.innerHTML =
+        '<span class="nm">' + escHtml(d.name) + '<span class="badge">' + escHtml(badge) + '</span></span>' +
+        '<span class="dim">you</span>';
+    } else {
+      var isOpen = selectedDeviceId === d.id && sendPanel.style.display !== 'none';
+      var label = isOpen ? 'Cancel' : 'Send';
+      var cls = isOpen ? 'ghost' : 'btn';
+      var dis = transferActive ? ' disabled' : '';
+      row.innerHTML =
+        '<span class="nm">' + escHtml(d.name) + '<span class="badge">' + escHtml(badge) + '</span></span>' +
+        '<button class="' + cls + '" data-dev="' + d.id + '"' + dis + '>' + label + '</button>';
+    }
     deviceList.appendChild(row);
   });
   deviceList.querySelectorAll('[data-dev]').forEach(function(b) {
     b.onclick = function() { selectDevice(b.getAttribute('data-dev')); };
   });
+  if (!me && !others.length) return;
+  if (!others.length) {
+    var hint = document.createElement('div');
+    hint.className = 'empty';
+    hint.textContent = 'Open this page on another device on the same Wi-Fi to send files.';
+    deviceList.appendChild(hint);
+  }
 }
 refreshBtn.addEventListener('click', async function() {
   var orig = refreshBtn.textContent;
@@ -187,6 +223,7 @@ refreshBtn.addEventListener('click', async function() {
 // --- Send panel: single box, 2 buttons; device Send toggles to Cancel ---
 function selectDevice(id) {
   if (transferActive) return;
+  if (id === myDeviceId) return; // never send to self
   // same device tapped again -> close popup (Send becomes Cancel toggle)
   if (selectedDeviceId === id && sendPanel.style.display !== 'none') {
     hideSendPanel();

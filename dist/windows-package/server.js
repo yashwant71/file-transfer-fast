@@ -157,12 +157,14 @@ const DEVICE_TIMEOUT = 30000;
 function registerDevice(deviceInfo) {
   const id = deviceInfo.id || generateId();
   const now = Date.now();
-  const isHost = deviceInfo.isHost || false;
+  const isHost = !!deviceInfo.isHost;
   const existing = devices.get(id);
   if (existing) {
     existing.lastSeen = now;
     existing.name = deviceInfo.name || existing.name;
     existing.ip = deviceInfo.ip || existing.ip;
+    // client declares host itself — no IP guessing. Keep flag in sync.
+    if (typeof deviceInfo.isHost === 'boolean') existing.isHost = isHost;
     return id;
   }
   devices.set(id, {
@@ -579,10 +581,9 @@ const devicesHtml = `<!DOCTYPE html>
     .top button { background: none; border: none; color: #fff; font-size: 12px; text-decoration: underline; cursor: pointer; }
     .dim { color: #888; font-size: 12px; }
     .sec { font-size: 12px; color: #888; text-transform: uppercase; letter-spacing: .06em; margin: 14px 0 4px; }
-    .dev { display: flex; align-items: center; gap: 10px; padding: 8px 0; border-bottom: 1px solid #222; }
-    .dev .nm { flex: 1; min-width: 0; }
-    .dev .nm b { font-size: 14px; }
-    .dev .ip { font-size: 12px; color: #888; }
+    .dev { display: flex; align-items: center; gap: 10px; padding: 8px 0; border-bottom: 1px solid #222; white-space: nowrap; }
+    .dev .nm { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 14px; font-weight: 600; }
+    .dev .badge { font-size: 12px; color: #888; font-weight: 400; margin-left: 6px; }
     .btn { background: #fff; color: #000; border: 1px solid #fff; border-radius: 4px; padding: 8px 12px; font-size: 13px; font-weight: 600; cursor: pointer; }
     .btn:disabled { opacity: .3; }
     .ghost { background: #000; color: #fff; border: 1px solid #444; border-radius: 4px; padding: 8px 12px; font-size: 13px; font-weight: 600; cursor: pointer; }
@@ -1088,8 +1089,11 @@ const requestHandler = (req, res) => {
       try {
         const deviceInfo = JSON.parse(body || '{}');
         const devIP = cleanIP(req.socket.remoteAddress);
-        const isHost = devIP === '127.0.0.1' || devIP === HOST_IP;
         deviceInfo.ip = devIP;
+        // No IP-based host guessing — client declares itself.
+        // Back-compat: explicit "Host PC" name still counts as host.
+        let isHost = !!deviceInfo.isHost;
+        if (!isHost && deviceInfo.name === 'Host PC') isHost = true;
         deviceInfo.isHost = isHost;
         if (isHost && (!deviceInfo.name || deviceInfo.name === 'My Device' || deviceInfo.name === 'Mobile Device')) {
           deviceInfo.name = 'Host PC';
