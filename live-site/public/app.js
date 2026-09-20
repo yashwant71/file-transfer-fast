@@ -170,11 +170,14 @@
           signal: AbortSignal.timeout(2000)
         });
         if (res.ok) {
-          const data = await res.json();
-          if (data && data.found === true && data.hostIp) {
-            displayHostFound(data.hostIp, data.httpPort, data.deviceName, data.allIps);
-            isChecking = false;
-            return;
+          const ctype = res.headers.get('content-type') || '';
+          if (ctype.includes('json')) {
+            const data = await res.json();
+            if (data && data.found === true && data.hostIp) {
+              displayHostFound(data.hostIp, data.httpPort, data.deviceName, data.allIps);
+              isChecking = false;
+              return;
+            }
           }
         }
       } catch(e) {}
