@@ -4,6 +4,7 @@
   "rewrites": [
     { "source": "/api/active-host", "destination": "/live-site/api/active-host.js" },
     { "source": "/api/announce", "destination": "/live-site/api/announce.js" },
+    { "source": "/devices-ui", "destination": "/live-site/public/device-ui.html" },
     { "source": "/(.*)", "destination": "/live-site/public/$1" }
   ]
 }

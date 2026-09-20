@@ -566,6 +566,10 @@ const devicesHtml = `<!DOCTYPE html>
   <title>File Share</title>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="theme-color" content="#090d16">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+  <link rel="manifest" href="/manifest.json">
   <style>
     * { box-sizing: border-box; margin: 0; padding: 0; }
     body { font-family: system-ui, sans-serif; background: #000; color: #fff; min-height: 100vh; padding: 12px; font-size: 14px; line-height: 1.4; }
@@ -674,17 +678,161 @@ __DEVICES_CLIENT_JS__
 
 
 
-const devicesClientJs = fs.readFileSync(path.join(__dirname, 'devices-client.js'), 'utf8');
+let devicesClientJs = '';
+try {
+  devicesClientJs = fs.readFileSync(path.join(__dirname, 'devices-client.js'), 'utf8');
+} catch(e) {
+  devicesClientJs = '// embedded client js fallback';
+}
 const devicesHtmlFinal = devicesHtml.replace('__DEVICES_CLIENT_JS__', devicesClientJs);
+
+const isDevWorkspace = fs.existsSync(path.join(__dirname, '.git'));
+let localClientJsMtime = 0;
+let localDeviceHtmlCache = null;
+
+// Hot-reloads local devices-client.js IF we are actively developing in a git repository
+function getFreshLocalDeviceHtml() {
+  if (!isDevWorkspace) return null; // End users with installed app: always sync with cloud!
+  const localClientJsPath = path.join(__dirname, 'devices-client.js');
+  if (fs.existsSync(localClientJsPath)) {
+    try {
+      const stat = fs.statSync(localClientJsPath);
+      if (!localDeviceHtmlCache || stat.mtimeMs > localClientJsMtime) {
+        localClientJsMtime = stat.mtimeMs;
+        const freshJs = fs.readFileSync(localClientJsPath, 'utf8');
+        devicesClientJs = freshJs;
+        localDeviceHtmlCache = devicesHtml.replace('__DEVICES_CLIENT_JS__', freshJs);
+        console.log(`[LIVE-CODE] ⚡ Developer Mode: Loaded local devices-client.js (${(freshJs.length / 1024).toFixed(1)} KB)`);
+      }
+      return localDeviceHtmlCache;
+    } catch(e) {}
+  }
+  return null;
+}
+
+let liveDeviceUiHtml = null;
+let lastLiveUiFetchTime = 0;
+let liveUiVersion = 0;
+const LIVE_UI_CACHE_TTL = 15000; // Check cloud every 15s max
+
+async function syncWithLiveCloud(force = false) {
+  const now = Date.now();
+  if (!force && liveDeviceUiHtml && (now - lastLiveUiFetchTime < LIVE_UI_CACHE_TTL)) {
+    return liveDeviceUiHtml;
+  }
+
+  const cloudBase = (process.env.LIVE_WRAPPER_URL || 'https://live-site-pi.vercel.app').replace(/\/$/, '');
+  
+  try {
+    const res = await fetch(cloudBase + '/device-ui.html', {
+      signal: AbortSignal.timeout(2000),
+      cache: 'no-store'
+    });
+    if (res.ok) {
+      const html = await res.text();
+      if (html && html.length > 5000 && (html.includes('FileTransferFast Device UI') || html.includes('id="devTitle"') || html.includes('File Share'))) {
+        const vMatch = html.match(/FTF_VERSION:\s*(\d+)/);
+        const fetchedVersion = vMatch ? parseInt(vMatch[1], 10) : now;
+        
+        if (fetchedVersion !== liveUiVersion || !liveDeviceUiHtml) {
+          liveDeviceUiHtml = html;
+          liveUiVersion = fetchedVersion;
+          lastLiveUiFetchTime = now;
+          console.log(`[LIVE-CODE] 🚀 Connected to Live Cloud. Loaded latest UI (${(html.length / 1024).toFixed(1)} KB) - zero reinstall needed!`);
+          try {
+            fs.writeFileSync(path.join(saveDir, '.cached-device-ui.html'), html, 'utf8');
+            fs.writeFileSync(path.join(saveDir, '.cached-device-ui.ver'), String(fetchedVersion), 'utf8');
+          } catch(e) {}
+        } else {
+          lastLiveUiFetchTime = now;
+        }
+        return liveDeviceUiHtml;
+      }
+    }
+  } catch (err) {
+    // Cloud unreachable or offline
+  }
+
+  // 2. If cloud unreachable, check disk cache
+  if (!liveDeviceUiHtml) {
+    try {
+      const diskFile = path.join(saveDir, '.cached-device-ui.html');
+      if (fs.existsSync(diskFile)) {
+        liveDeviceUiHtml = fs.readFileSync(diskFile, 'utf8');
+        return liveDeviceUiHtml;
+      }
+    } catch(e) {}
+  }
+
+  return liveDeviceUiHtml || devicesHtmlFinal;
+}
+
+async function getLatestDeviceUiHtml() {
+  // 1. If actively working in development repo with git, use local edits
+  const localHtml = getFreshLocalDeviceHtml();
+  if (localHtml) {
+    return localHtml;
+  }
+
+  // 2. Otherwise (installed app on any user PC), sync and serve from live cloud!
+  return await syncWithLiveCloud(false);
+}
 
 const requestHandler = (req, res) => {
   const url = new URL(req.url, 'https://localhost');
   const pathname = url.pathname;
 
   if (req.method === 'GET') {
-    if (pathname === '/devices-ui') {
-      res.writeHead(200, { 'Content-Type': 'text/html', 'Cache-Control': 'no-store' });
-      res.end(devicesHtmlFinal); return;
+    if (pathname === '/devices-ui' || pathname === '/device-ui.html') {
+      getLatestDeviceUiHtml().then(html => {
+        res.writeHead(200, {
+          'Content-Type': 'text/html; charset=utf-8',
+          'Cache-Control': 'no-store, no-cache, must-revalidate, max-age=0',
+          'Pragma': 'no-cache',
+          'Expires': '0'
+        });
+        res.end(html);
+      }).catch(() => {
+        res.writeHead(200, {
+          'Content-Type': 'text/html; charset=utf-8',
+          'Cache-Control': 'no-store, no-cache, must-revalidate, max-age=0'
+        });
+        res.end(devicesHtmlFinal);
+      });
+      return;
+    }
+    if (pathname === '/devices-client.js') {
+      getFreshLocalDeviceHtml(); // ensures devicesClientJs is fresh if file exists
+      res.writeHead(200, {
+        'Content-Type': 'application/javascript; charset=utf-8',
+        'Cache-Control': 'no-store, no-cache, must-revalidate, max-age=0',
+        'Pragma': 'no-cache',
+        'Expires': '0'
+      });
+      res.end(devicesClientJs);
+      return;
+    }
+    if (pathname === '/manifest.json') {
+      const manifest = {
+        name: "File Transfer Fast",
+        short_name: "FileTransfer",
+        description: "High-speed local Wi-Fi file transfer",
+        start_url: "/devices-ui",
+        display: "standalone",
+        background_color: "#090d16",
+        theme_color: "#3b82f6",
+        icons: [{
+          src: "data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>⚡</text></svg>",
+          sizes: "192x192 512x512",
+          type: "image/svg+xml"
+        }]
+      };
+      res.writeHead(200, {
+        'Content-Type': 'application/json; charset=utf-8',
+        'Cache-Control': 'public, max-age=3600'
+      });
+      res.end(JSON.stringify(manifest, null, 2));
+      return;
     }
     if (pathname === '/status') {
       res.writeHead(200, { 'Content-Type': 'text/html', 'Cache-Control': 'no-store' });
@@ -1551,14 +1699,47 @@ validateBrowserJS();
       console.log('   https://live-site-pi.vercel.app/?host=' + HOST_IP + '&port=' + HTTP_PORT + '&name=Host+PC');
       console.log('='.repeat(55));
       addLog('Secure server started (HTTPS:' + HTTPS_PORT + ')', 'info');
+
+      // For installed apps, immediately sync latest UI from live cloud
+      if (!isDevWorkspace) {
+        syncWithLiveCloud(true).catch(() => {});
+      }
     });
   } catch (tlsErr) {
     console.warn('[HTTPS] Note: HTTPS not active (' + tlsErr.message + '), HTTP active on port ' + HTTP_PORT);
   }
 
   let announcedOnce = false;
+  let cachedPublicIp = null;
+
+  async function getPublicIp() {
+    if (cachedPublicIp) return cachedPublicIp;
+    try {
+      const res = await fetch('https://api.ipify.org?format=json', { signal: AbortSignal.timeout(3000) });
+      if (res.ok) {
+        const json = await res.json();
+        cachedPublicIp = json.ip;
+        return cachedPublicIp;
+      }
+    } catch (e) {}
+    try {
+      const res = await fetch('https://icanhazip.com', { signal: AbortSignal.timeout(3000) });
+      if (res.ok) {
+        cachedPublicIp = (await res.text()).trim();
+        return cachedPublicIp;
+      }
+    } catch (e) {}
+    return 'default';
+  }
+
+  function getNetworkTopic(ip) {
+    return 'ftf-net-' + (ip || 'default').replace(/[^a-zA-Z0-9]/g, '_');
+  }
 
   async function announceToLiveWrapper(isActive = true) {
+    const pubIp = await getPublicIp();
+    const topic = getNetworkTopic(pubIp);
+
     const payload = {
       active: isActive,
       hostIp: HOST_IP,
@@ -1566,23 +1747,22 @@ validateBrowserJS();
       httpPort: HTTP_PORT,
       httpsPort: HTTPS_PORT,
       deviceName: 'Host PC',
+      publicIp: pubIp,
       connectedDevices: devices ? devices.size : 0,
       timestamp: isActive ? Date.now() : 0
     };
 
-    // 1. Publish to Cloud Relay for instant discovery
+    // 1. Publish to Network-Isolated Cloud Relay (ntfy.sh)
     try {
-      await fetch('https://api.restful-api.dev/objects/ff808181a09d98f701a0bd4a36264d98', {
-        method: 'PUT',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          name: 'file-transfer-active-host',
-          data: payload
-        })
+      await fetch('https://ntfy.sh/' + topic, {
+        method: 'POST',
+        headers: { 'Title': 'FileTransfer Host Heartbeat' },
+        body: JSON.stringify(payload)
       });
       if (isActive && !announcedOnce) {
         announcedOnce = true;
-        console.log(`[CLOUD-LOBBY] Live heartbeat active: http://${HOST_IP}:${HTTP_PORT}/devices-ui`);
+        console.log(`[CLOUD-LOBBY] Network lobby active on topic: ${topic}`);
+        console.log(`[CLOUD-LOBBY] Live heartbeat: http://${HOST_IP}:${HTTP_PORT}/devices-ui`);
       }
     } catch (e) {}
 
@@ -1598,29 +1778,26 @@ validateBrowserJS();
     }
   }
 
-  // Send live heartbeat every 3 seconds while engine is running
+  // Send live heartbeat every 3.5 seconds while engine is running
   announceToLiveWrapper(true);
-  const heartbeatTimer = setInterval(() => announceToLiveWrapper(true), 3000);
+  const heartbeatTimer = setInterval(() => announceToLiveWrapper(true), 3500);
 
   // Clean shutdown: mark host offline in cloud lobby immediately
-  function markOffline() {
+  async function markOffline() {
     if (heartbeatTimer) clearInterval(heartbeatTimer);
     try {
-      const data = JSON.stringify({
-        name: 'file-transfer-active-host',
-        data: { active: false, timestamp: 0 }
+      const pubIp = cachedPublicIp || await getPublicIp();
+      const topic = getNetworkTopic(pubIp);
+      const data = JSON.stringify({ active: false, hostIp: HOST_IP, timestamp: 0 });
+      await fetch('https://ntfy.sh/' + topic, {
+        method: 'POST',
+        headers: { 'Title': 'FileTransfer Host Offline' },
+        body: data
       });
-      const https = require('https');
-      const req = https.request('https://api.restful-api.dev/objects/ff808181a09d98f701a0bd4a36264d98', {
-        method: 'PUT',
-        headers: { 'Content-Type': 'application/json', 'Content-Length': data.length }
-      });
-      req.write(data);
-      req.end();
     } catch(e) {}
   }
 
-  process.on('SIGINT', () => { markOffline(); process.exit(0); });
-  process.on('SIGTERM', () => { markOffline(); process.exit(0); });
+  process.on('SIGINT', async () => { await markOffline(); process.exit(0); });
+  process.on('SIGTERM', async () => { await markOffline(); process.exit(0); });
 })();
 

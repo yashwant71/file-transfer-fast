@@ -24,19 +24,37 @@ const serverJsContent = fs.readFileSync(path.join(ROOT_DIR, 'server.js'), 'utf8'
 const devicesClientJs = fs.readFileSync(path.join(ROOT_DIR, 'devices-client.js'), 'utf8');
 
 // Extract devicesHtml template from server.js
-const match = serverJsContent.match(/const devicesHtml = `([\s\S]*?)`;\s*\n\s*\n\s*\nconst devicesClientJs/);
+const match = serverJsContent.match(/const devicesHtml = `([\s\S]*?)`;\s*\n[\s\S]*?(?:const|let) devicesClientJs/);
 if (!match) {
   console.error('❌ Could not extract devicesHtml from server.js');
   process.exit(1);
 }
 
+// Generate build version timestamp
+const buildVersion = Date.now();
+const versionData = {
+  version: buildVersion,
+  buildDate: new Date().toISOString()
+};
+
 const devicesHtml = match[1];
-const standaloneHtml = devicesHtml.replace('__DEVICES_CLIENT_JS__', devicesClientJs);
+const standaloneHtml = `<!-- FTF_VERSION: ${buildVersion} -->\n<!-- FileTransferFast Device UI Live Source -->\n` + devicesHtml.replace('__DEVICES_CLIENT_JS__', devicesClientJs);
 
 // Write standalone Device UI HTML
 const deviceUiHtmlPath = path.join(DIST_DIR, 'device-ui', 'index.html');
 fs.writeFileSync(deviceUiHtmlPath, standaloneHtml, 'utf8');
 console.log(`   ✔ Generated: dist/device-ui/index.html (${(standaloneHtml.length / 1024).toFixed(1)} KB)`);
+
+// Also save directly to live-site for instant cloud delivery
+const liveSiteUiPath = path.join(ROOT_DIR, 'live-site', 'public', 'device-ui.html');
+fs.writeFileSync(liveSiteUiPath, standaloneHtml, 'utf8');
+console.log(`   ✔ Generated: live-site/public/device-ui.html (Live Cloud UI Source)`);
+
+// Save devices-client.js and version.json to live-site public
+fs.writeFileSync(path.join(ROOT_DIR, 'live-site', 'public', 'devices-client.js'), devicesClientJs, 'utf8');
+fs.writeFileSync(path.join(ROOT_DIR, 'live-site', 'public', 'version.json'), JSON.stringify(versionData, null, 2), 'utf8');
+fs.writeFileSync(path.join(DIST_DIR, 'device-ui', 'version.json'), JSON.stringify(versionData, null, 2), 'utf8');
+console.log(`   ✔ Generated: live-site/public/version.json & devices-client.js (Build v${buildVersion})`);
 
 // Generate Web App Manifest for Mobile PWA
 const manifestJson = {

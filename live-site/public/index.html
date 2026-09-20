@@ -460,15 +460,15 @@
         <!-- SUB-STATE B: Host Found! (Single Click Connect) -->
         <section id="stateHostFound" class="state-view hidden">
           <div class="icon-circle success">
-            <span>💻</span>
+            <span id="hostIcon">💻</span>
           </div>
-          <h1 class="title">Host Device Found!</h1>
-          <p class="subtitle">Connected on your local network & ready to transfer.</p>
+          <h1 class="title" id="hostFoundTitle">Host Device Found!</h1>
+          <p class="subtitle" id="hostFoundSubtitle">Connected on your local network & ready to transfer.</p>
 
           <div class="host-card">
             <div class="host-header-line">
               <span class="host-name" id="foundHostName">Host PC</span>
-              <span class="host-badge">ONLINE</span>
+              <span class="host-badge" id="foundHostBadge">ONLINE</span>
             </div>
             <div class="host-ip" id="foundHostIp">10.14.0.243:8001</div>
           </div>
@@ -476,7 +476,10 @@
           <a id="connectDirectBtn" href="#" class="btn btn-primary">
             ⚡ Connect to Host & Transfer Files &rarr;
           </a>
-          <p class="subtitle" style="font-size: 0.78rem; margin-top: 0.5rem;">
+          <a id="selfHostBtn" href="http://localhost:8001/devices-ui" class="btn btn-secondary hidden" style="margin-top: 0.4rem;">
+            📂 Open Local Host Dashboard &rarr;
+          </a>
+          <p class="subtitle" id="hostFooterNote" style="font-size: 0.78rem; margin-top: 0.5rem;">
             Zero installation required. Transfers directly over Wi-Fi at max speed.
           </p>
         </section>
