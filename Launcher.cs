@@ -173,6 +173,25 @@ namespace FileTransferFast
 
         private static void Cleanup()
         {
+            // 1. Immediately mark host offline in cloud lobby
+            try
+            {
+                var req = (System.Net.HttpWebRequest)System.Net.WebRequest.Create("https://api.restful-api.dev/objects/ff808181a09d98f701a0bd4a36264d98");
+                req.Method = "PUT";
+                req.ContentType = "application/json";
+                req.Timeout = 1200;
+                string json = "{\"name\":\"file-transfer-active-host\",\"data\":{\"active\":false,\"timestamp\":0}}";
+                byte[] bytes = System.Text.Encoding.UTF8.GetBytes(json);
+                req.ContentLength = bytes.Length;
+                using (var stream = req.GetRequestStream())
+                {
+                    stream.Write(bytes, 0, bytes.Length);
+                }
+                using (var resp = req.GetResponse()) { }
+            }
+            catch { }
+
+            // 2. Kill server process
             try
             {
                 if (serverProcess != null && !serverProcess.HasExited)

@@ -1556,15 +1556,18 @@ validateBrowserJS();
     console.warn('[HTTPS] Note: HTTPS not active (' + tlsErr.message + '), HTTP active on port ' + HTTP_PORT);
   }
 
-  // Live Wrapper Announcement Hook (Dynamic Cloud Pairing)
-  async function announceToLiveWrapper() {
+  let announcedOnce = false;
+
+  async function announceToLiveWrapper(isActive = true) {
     const payload = {
+      active: isActive,
       hostIp: HOST_IP,
       allIps: getAllLocalIPs(),
       httpPort: HTTP_PORT,
       httpsPort: HTTPS_PORT,
       deviceName: 'Host PC',
-      timestamp: Date.now()
+      connectedDevices: devices ? devices.size : 0,
+      timestamp: isActive ? Date.now() : 0
     };
 
     // 1. Publish to Cloud Relay for instant discovery
@@ -1577,10 +1580,11 @@ validateBrowserJS();
           data: payload
         })
       });
-      console.log(`[CLOUD-LOBBY] Host broadcast active (${HOST_IP}:${HTTP_PORT})`);
-    } catch (e) {
-      console.warn('[CLOUD-LOBBY] Relay notice:', e.message);
-    }
+      if (isActive && !announcedOnce) {
+        announcedOnce = true;
+        console.log(`[CLOUD-LOBBY] Live heartbeat active: http://${HOST_IP}:${HTTP_PORT}/devices-ui`);
+      }
+    } catch (e) {}
 
     // 2. Publish to Vercel endpoint
     if (LIVE_WRAPPER_URL) {
@@ -1594,7 +1598,29 @@ validateBrowserJS();
     }
   }
 
-  announceToLiveWrapper();
-  setInterval(announceToLiveWrapper, 15 * 1000);
+  // Send live heartbeat every 3 seconds while engine is running
+  announceToLiveWrapper(true);
+  const heartbeatTimer = setInterval(() => announceToLiveWrapper(true), 3000);
+
+  // Clean shutdown: mark host offline in cloud lobby immediately
+  function markOffline() {
+    if (heartbeatTimer) clearInterval(heartbeatTimer);
+    try {
+      const data = JSON.stringify({
+        name: 'file-transfer-active-host',
+        data: { active: false, timestamp: 0 }
+      });
+      const https = require('https');
+      const req = https.request('https://api.restful-api.dev/objects/ff808181a09d98f701a0bd4a36264d98', {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json', 'Content-Length': data.length }
+      });
+      req.write(data);
+      req.end();
+    } catch(e) {}
+  }
+
+  process.on('SIGINT', () => { markOffline(); process.exit(0); });
+  process.on('SIGTERM', () => { markOffline(); process.exit(0); });
 })();
 

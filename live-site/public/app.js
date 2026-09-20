@@ -66,54 +66,47 @@
     return;
   }
 
-  // 2. Discover Active Host
-  let isScanning = false;
+  // Live heartbeat timeout: 7 seconds maximum (strictly enforces real-time presence)
+  const HEARTBEAT_TIMEOUT_MS = 7000;
 
   async function discoverHost() {
-    if (isScanning) return;
-    isScanning = true;
-
-    // Check Cloud Relay
+    // 1. Check Cloud Relay
     try {
       const resp = await fetch(RELAY_URL, { cache: 'no-store' });
       if (resp.ok) {
         const json = await resp.json();
         const data = json.data;
-        if (data && data.hostIp) {
-          // Check if announcement is recent (within last 30 minutes)
+        if (data && data.active === true && data.hostIp) {
           const now = Date.now();
           const age = now - (data.timestamp || 0);
-          if (age < 30 * 60 * 1000) {
+          // Only accept if heartbeat was received within the last 7 seconds
+          if (age >= 0 && age < HEARTBEAT_TIMEOUT_MS) {
             displayHostFound(data.hostIp, data.httpPort || 8001, data.deviceName || 'Host PC');
-            isScanning = false;
             return;
           }
         }
       }
-    } catch (e) {
-      // Cloud relay check failed, try Vercel local API next
-    }
+    } catch (e) {}
 
-    // Check Vercel local API as secondary
+    // 2. Check Vercel local API fallback
     try {
       const apiResp = await fetch('/api/active-host', { cache: 'no-store' });
       if (apiResp.ok) {
         const apiData = await apiResp.json();
-        if (apiData.found && apiData.hostIp) {
-          displayHostFound(apiData.hostIp, apiData.httpPort || 8001, apiData.deviceName || 'Host PC');
-          isScanning = false;
-          return;
+        if (apiData && apiData.found && apiData.active && apiData.hostIp) {
+          const now = Date.now();
+          const age = now - (apiData.timestamp || 0);
+          if (age >= 0 && age < HEARTBEAT_TIMEOUT_MS) {
+            displayHostFound(apiData.hostIp, apiData.httpPort || 8001, apiData.deviceName || 'Host PC');
+            return;
+          }
         }
       }
     } catch (e) {}
 
-    // If still in scanning state after check
-    if (stateHostFound.classList.contains('hidden')) {
-      showFindState('no_host');
-      netStatus.innerHTML = '<span class="dot" style="background:#f59e0b"></span> Waiting for Host';
-    }
-
-    isScanning = false;
+    // 3. No active heartbeat: MUST display No Host Online
+    showFindState('no_host');
+    netStatus.innerHTML = '<span class="dot" style="background:#f59e0b"></span> No Host Online';
   }
 
   // Manual IP connect
@@ -143,10 +136,8 @@
   showFindState('scanning');
   discoverHost();
 
-  // Auto poll every 6 seconds if host not yet connected
+  // Auto-poll every 2.5 seconds to always reflect the true live state of the host
   setInterval(() => {
-    if (stateHostFound.classList.contains('hidden')) {
-      discoverHost();
-    }
-  }, 6000);
+    discoverHost();
+  }, 2500);
 })();

@@ -14,9 +14,12 @@ module.exports = async (req, res) => {
     if (relayRes.ok) {
       const json = await relayRes.json();
       const data = json.data;
-      if (data && data.hostIp) {
+      const now = Date.now();
+      const age = now - (data ? data.timestamp || 0 : 0);
+      if (data && data.active === true && data.hostIp && age >= 0 && age < 7000) {
         return res.status(200).json({
           found: true,
+          active: true,
           hostIp: data.hostIp,
           httpPort: data.httpPort || 8001,
           httpsPort: data.httpsPort || 8443,
