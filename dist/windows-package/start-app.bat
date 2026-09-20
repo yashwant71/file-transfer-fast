@@ -1,4 +1,5 @@
 @echo off
+cd /d "%~dp0"
 title File Transfer Fast - Starting...
 echo ========================================================
 echo        File Transfer Fast - Local Engine
@@ -10,12 +11,13 @@ where node >nul 2>nul
 if %errorlevel% neq 0 (
     echo [ERROR] Node.js is not installed or not in PATH!
     echo Please install Node.js from https://nodejs.org
+    echo.
     pause
     exit /b 1
 )
 
 echo Starting local engine on ports 8001 (HTTP) and 8443 (HTTPS)...
-start /b "" node server.js
+start /b "" node "%~dp0server.js"
 
 :: Wait a brief moment for server to bind
 timeout /t 2 /nobreak >nul

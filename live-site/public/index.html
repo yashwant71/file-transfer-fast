@@ -359,7 +359,51 @@
       border-color: var(--accent-blue);
     }
 
-    /* Help Tips */
+    .btn-download-pill.highlight {
+      background: rgba(59, 130, 246, 0.18);
+      border-color: rgba(59, 130, 246, 0.5);
+      color: #93c5fd;
+      font-weight: 600;
+    }
+
+    .btn-download-pill.highlight:hover {
+      background: rgba(59, 130, 246, 0.3);
+      border-color: var(--accent-blue);
+      color: #fff;
+    }
+
+    .instruction-steps {
+      margin-top: 1rem;
+      background: rgba(0, 0, 0, 0.35);
+      border: 1px solid rgba(255, 255, 255, 0.08);
+      border-radius: 10px;
+      padding: 0.85rem 1rem;
+      text-align: left;
+      font-size: 0.8rem;
+      color: var(--text-secondary);
+    }
+
+    .instruction-steps strong {
+      color: #fff;
+    }
+
+    .instruction-steps ol {
+      margin: 0.35rem 0 0 1.2rem;
+      padding: 0;
+      line-height: 1.5;
+    }
+
+    .instruction-steps li {
+      margin-bottom: 0.25rem;
+    }
+
+    .instruction-steps code {
+      background: rgba(255, 255, 255, 0.1);
+      padding: 0.15rem 0.35rem;
+      border-radius: 4px;
+      color: #38bdf8;
+      font-size: 0.76rem;
+    }
     .help-tips {
       margin-top: 1.25rem;
       display: flex;
@@ -476,11 +520,14 @@
           <h4>Host Engine Downloads</h4>
           <p>Only the host needs the engine to serve local Wi-Fi files. Second devices connect through the browser.</p>
           <div class="download-grid">
-            <a href="/downloads/file-transfer-windows.zip" download="file-transfer-windows.zip" class="btn-download-pill">
-              <span>💻</span> Windows App (.zip)
+            <a href="/downloads/FileTransferFast.exe" download="FileTransferFast.exe" class="btn-download-pill highlight">
+              <span>⚡</span> Windows App (.exe)
             </a>
-            <a href="/downloads/file-transfer.apk" download="file-transfer.apk" class="btn-download-pill">
+            <a href="/downloads/file-transfer.apk" download="file-transfer.apk" class="btn-download-pill highlight">
               <span>📱</span> Android App (.apk)
+            </a>
+            <a href="/downloads/file-transfer-windows.zip" download="file-transfer-windows.zip" class="btn-download-pill">
+              <span>💻</span> Windows Package (.zip)
             </a>
             <a href="/downloads/file-transfer-mac-linux.zip" download="file-transfer-mac-linux.zip" class="btn-download-pill">
               <span>🖥️</span> Mac / Linux (.zip)
@@ -488,6 +535,17 @@
             <a href="/downloads/file-transfer-web.zip" download="file-transfer-web.zip" class="btn-download-pill">
               <span>🌐</span> Web Bundle (.zip)
             </a>
+          </div>
+
+          <div class="instruction-steps">
+            <div style="font-weight: 600; color: #fff; margin-bottom: 0.35rem; display: flex; align-items: center; gap: 0.4rem;">
+              <span>⚡</span> Easy Host Setup:
+            </div>
+            <ol>
+              <li><strong>Windows:</strong> Download & double-click <code>FileTransferFast.exe</code> (with blue lightning icon). It auto-runs the engine and opens your browser.</li>
+              <li><strong>Android:</strong> Install <code>file-transfer.apk</code> to host files directly from your phone.</li>
+              <li><strong>Second Device:</strong> Needs <strong>ZERO install</strong> — simply open this live website on the same Wi-Fi and enter the 4-digit PIN!</li>
+            </ol>
           </div>
         </div>
       </details>

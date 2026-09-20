@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+cd "$(dirname "$0")"
 echo "======================================================="
 echo "     File Transfer Fast - Local Engine (Mac / Linux)  "
 echo "======================================================="

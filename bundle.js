@@ -59,10 +59,34 @@ fs.writeFileSync(path.join(DIST_DIR, 'device-ui', 'manifest.json'), JSON.stringi
 console.log('   ✔ Generated: dist/device-ui/manifest.json');
 
 // --- STEP 2: Package Windows Desktop App Bundle ---
-console.log('\n📦 Step 2: Packaging Windows Desktop App bundle (.zip)...');
+console.log('\n📦 Step 2: Packaging Windows Desktop App bundle (.exe & .zip)...');
 const winPkgDir = path.join(DIST_DIR, 'windows-package');
 try { fs.rmSync(winPkgDir, { recursive: true, force: true }); } catch(e) {}
 fs.mkdirSync(winPkgDir, { recursive: true });
+
+// Compile FileTransferFast.exe if csc is available
+const cscPath = 'C:\\Windows\\Microsoft.NET\\Framework64\\v4.0.30319\\csc.exe';
+const exeDestInDownloads = path.join(DOWNLOADS_DIR, 'FileTransferFast.exe');
+const exeDestInPkg = path.join(winPkgDir, 'FileTransferFast.exe');
+const rootExe = path.join(ROOT_DIR, 'FileTransferFast.exe');
+
+if (fs.existsSync(cscPath) && fs.existsSync(path.join(ROOT_DIR, 'Launcher.cs'))) {
+  try {
+    console.log('   🔨 Compiling FileTransferFast.exe with native app icon...');
+    const compileCmd = `"${cscPath}" /target:winexe /win32icon:app.ico /r:System.Windows.Forms.dll,System.Drawing.dll /resource:server.js,FileTransferFast.server.js /resource:devices-client.js,FileTransferFast.devices-client.js /resource:client.js,FileTransferFast.client.js /resource:package.json,FileTransferFast.package.json /out:FileTransferFast.exe Launcher.cs`;
+    execSync(compileCmd, { cwd: ROOT_DIR, stdio: 'ignore' });
+    console.log('   ✔ Successfully compiled FileTransferFast.exe');
+  } catch (err) {
+    console.warn('   ⚠ C# compilation note:', err.message);
+  }
+}
+
+if (fs.existsSync(rootExe)) {
+  fs.copyFileSync(rootExe, exeDestInDownloads);
+  fs.copyFileSync(rootExe, exeDestInPkg);
+  const exeStat = fs.statSync(exeDestInDownloads);
+  console.log(`   ✔ Generated direct download: live-site/public/downloads/FileTransferFast.exe (${(exeStat.size / 1024).toFixed(1)} KB)`);
+}
 
 // Copy required files for the Windows bundle
 const filesToCopy = [
@@ -71,7 +95,8 @@ const filesToCopy = [
   'client.js',
   'package.json',
   'start-app.bat',
-  'stop-app.bat'
+  'stop-app.bat',
+  'app.ico'
 ];
 
 filesToCopy.forEach(f => {
@@ -81,30 +106,43 @@ filesToCopy.forEach(f => {
   }
 });
 
-// Add README for Windows package users
-const readmeText = `=====================================================
-File Transfer Fast - Windows Desktop App
+// Add clear, user-friendly HOW-TO-RUN instructions for Windows package users
+const howToRunText = `=====================================================
+⚡ FILE TRANSFER FAST — WINDOWS HOST APP
 =====================================================
 
-QUICK START:
-1. Make sure Node.js is installed on your PC (https://nodejs.org).
-2. Double-click "start-app.bat".
-3. Your browser will automatically open with the high-speed Device UI!
+HOW TO RUN:
+1. Double-click "FileTransferFast.exe" (the blue lightning icon).
+2. The transfer engine starts and opens your browser automatically!
+3. Other devices on your Wi-Fi can now connect via PIN or QR code.
 
-TO STOP:
-Double-click "stop-app.bat" or close the console window.
+HOW TO STOP:
+- Click the "Stop & Exit" button on the File Transfer Fast window.
+
+NOTE:
+- Node.js (https://nodejs.org) powers the high-speed transfer engine.
+  If not already installed, FileTransferFast.exe will provide a 1-click link.
+- Alternatively, you can also run "start-app.bat" anytime.
 `;
-fs.writeFileSync(path.join(winPkgDir, 'README.txt'), readmeText, 'utf8');
+fs.writeFileSync(path.join(winPkgDir, 'HOW-TO-RUN.txt'), howToRunText, 'utf8');
+fs.writeFileSync(path.join(winPkgDir, 'README.txt'), howToRunText, 'utf8');
+
+function createZip(sourceDir, targetZip) {
+  if (fs.existsSync(targetZip)) {
+    try { fs.unlinkSync(targetZip); } catch (e) {}
+  }
+  const s = sourceDir.replace(/\\/g, '\\\\');
+  const d = targetZip.replace(/\\/g, '\\\\');
+  const psCmd = `powershell -NoProfile -Command "Add-Type -AssemblyName System.IO.Compression.FileSystem; [System.IO.Compression.ZipFile]::CreateFromDirectory('${s}', '${d}')"`;
+  execSync(psCmd, { stdio: 'pipe' });
+  return fs.statSync(targetZip).size;
+}
 
 // Compress Windows bundle into live-site downloads
 const winZipPath = path.join(DOWNLOADS_DIR, 'file-transfer-windows.zip');
 try {
-  if (process.platform === 'win32') {
-    const psCmd = `powershell -NoProfile -Command "Compress-Archive -Path '${winPkgDir}\\*' -DestinationPath '${winZipPath}' -Force"`;
-    execSync(psCmd, { stdio: 'inherit' });
-    const stat = fs.statSync(winZipPath);
-    console.log(`   ✔ Created: live-site/public/downloads/file-transfer-windows.zip (${(stat.size / 1024).toFixed(1)} KB)`);
-  }
+  const size = createZip(winPkgDir, winZipPath);
+  console.log(`   ✔ Created: live-site/public/downloads/file-transfer-windows.zip (${(size / 1024).toFixed(1)} KB)`);
 } catch (err) {
   console.warn('   ⚠ Could not create Windows zip archive:', err.message);
 }
@@ -118,12 +156,8 @@ if (!fs.existsSync(macPkgDir)) fs.mkdirSync(macPkgDir, { recursive: true });
 });
 const macZipPath = path.join(DOWNLOADS_DIR, 'file-transfer-mac-linux.zip');
 try {
-  if (process.platform === 'win32') {
-    const psCmd = `powershell -NoProfile -Command "Compress-Archive -Path '${macPkgDir}\\*' -DestinationPath '${macZipPath}' -Force"`;
-    execSync(psCmd, { stdio: 'inherit' });
-    const stat = fs.statSync(macZipPath);
-    console.log(`   ✔ Created: live-site/public/downloads/file-transfer-mac-linux.zip (${(stat.size / 1024).toFixed(1)} KB)`);
-  }
+  const size = createZip(macPkgDir, macZipPath);
+  console.log(`   ✔ Created: live-site/public/downloads/file-transfer-mac-linux.zip (${(size / 1024).toFixed(1)} KB)`);
 } catch (err) {
   console.warn('   ⚠ Could not create Mac/Linux zip archive:', err.message);
 }
@@ -132,12 +166,8 @@ try {
 console.log('\n📦 Step 3: Packaging Mobile Web Bundle...');
 const webZipPath = path.join(DOWNLOADS_DIR, 'file-transfer-web.zip');
 try {
-  if (process.platform === 'win32') {
-    const psCmd = `powershell -NoProfile -Command "Compress-Archive -Path '${DIST_DIR}\\device-ui\\*' -DestinationPath '${webZipPath}' -Force"`;
-    execSync(psCmd, { stdio: 'inherit' });
-    const stat = fs.statSync(webZipPath);
-    console.log(`   ✔ Created: live-site/public/downloads/file-transfer-web.zip (${(stat.size / 1024).toFixed(1)} KB)`);
-  }
+  const size = createZip(path.join(DIST_DIR, 'device-ui'), webZipPath);
+  console.log(`   ✔ Created: live-site/public/downloads/file-transfer-web.zip (${(size / 1024).toFixed(1)} KB)`);
 } catch (err) {
   console.warn('   ⚠ Could not create web zip archive:', err.message);
 }
