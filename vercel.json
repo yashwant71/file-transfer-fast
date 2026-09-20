@@ -2,9 +2,17 @@
   "version": 2,
   "cleanUrls": true,
   "rewrites": [
-    { "source": "/api/active-host", "destination": "/live-site/api/active-host.js" },
-    { "source": "/api/announce", "destination": "/live-site/api/announce.js" },
     { "source": "/devices-ui", "destination": "/live-site/public/device-ui.html" },
-    { "source": "/(.*)", "destination": "/live-site/public/$1" }
+    { "source": "/((?!api/).*)", "destination": "/live-site/public/$1" }
+  ],
+  "headers": [
+    {
+      "source": "/(.*)",
+      "headers": [
+        { "key": "Cache-Control", "value": "no-cache, no-store, must-revalidate" },
+        { "key": "Pragma", "value": "no-cache" },
+        { "key": "Expires", "value": "0" }
+      ]
+    }
   ]
 }

@@ -1716,36 +1716,53 @@ validateBrowserJS();
 
   async function getPublicIp() {
     if (cachedPublicIp) return cachedPublicIp;
-    try {
-      const res = await fetch('https://api.ipify.org?format=json', { signal: AbortSignal.timeout(3000) });
-      if (res.ok) {
-        const json = await res.json();
-        cachedPublicIp = json.ip;
-        return cachedPublicIp;
-      }
-    } catch (e) {}
-    try {
-      const res = await fetch('https://icanhazip.com', { signal: AbortSignal.timeout(3000) });
-      if (res.ok) {
-        cachedPublicIp = (await res.text()).trim();
-        return cachedPublicIp;
-      }
-    } catch (e) {}
+    const providers = [
+      'https://api4.ipify.org?format=json',
+      'https://api.ipify.org?format=json',
+      'https://ipv4.icanhazip.com',
+      'https://v4.ident.me'
+    ];
+    for (const url of providers) {
+      try {
+        const res = await fetch(url, { signal: AbortSignal.timeout(2500) });
+        if (res.ok) {
+          let ip = '';
+          if (url.includes('json')) {
+            const json = await res.json();
+            ip = json.ip;
+          } else {
+            ip = (await res.text()).trim();
+          }
+          if (ip && ip.includes('.')) {
+            cachedPublicIp = ip;
+            return cachedPublicIp;
+          }
+        }
+      } catch (e) {}
+    }
     return 'default';
   }
 
-  function getNetworkTopic(ip) {
-    return 'ftf-net-' + (ip || 'default').replace(/[^a-zA-Z0-9]/g, '_');
+  function getNetworkTopics(ip) {
+    const topics = ['ftf-hotspot-active'];
+    if (!ip || ip === 'default') return topics;
+    const clean = ip.replace(/[^a-zA-Z0-9]/g, '_');
+    topics.push('ftf-net-' + clean);
+    const parts = ip.split('.');
+    if (parts.length === 4) {
+      topics.push('ftf-sub-' + parts[0] + '_' + parts[1] + '_' + parts[2]);
+    }
+    return topics;
   }
 
   const CLOUD_RELAYS = [
-    'https://ntfy.envs.net',
-    'https://ntfy.sh'
+    'https://ntfy.sh',
+    'https://ntfy.envs.net'
   ];
 
   async function announceToLiveWrapper(isActive = true) {
     const pubIp = await getPublicIp();
-    const topic = getNetworkTopic(pubIp);
+    const topics = getNetworkTopics(pubIp);
 
     const payload = {
       active: isActive,
@@ -1762,61 +1779,105 @@ validateBrowserJS();
     const bodyStr = JSON.stringify(payload);
     let publishedRelay = null;
 
-    // Publish to relays with automatic failover
-    for (const relay of CLOUD_RELAYS) {
-      try {
-        const res = await fetch(relay + '/' + topic, {
-          method: 'POST',
-          headers: { 'Title': 'FileTransfer Host Heartbeat' },
-          body: bodyStr,
-          signal: AbortSignal.timeout(3000)
-        });
-        if (res.ok) {
-          publishedRelay = relay;
-          break;
-        }
-      } catch (e) {}
+    // 1. Publish to all topics (exact + subnet + hotspot-active) across redundant relays
+    for (const topic of topics) {
+      for (const relay of CLOUD_RELAYS) {
+        try {
+          const res = await fetch(relay + '/' + topic, {
+            method: 'POST',
+            headers: { 'Title': 'FileTransfer Host Heartbeat' },
+            body: bodyStr,
+            signal: AbortSignal.timeout(2500)
+          });
+          if (res.ok) {
+            publishedRelay = relay;
+            break;
+          }
+        } catch (e) {}
+      }
     }
 
-    if (isActive && !announcedOnce) {
-      announcedOnce = true;
-      console.log(`[CLOUD-LOBBY] Network lobby active on topic: ${topic} (${publishedRelay || 'relays'})`);
-      console.log(`[CLOUD-LOBBY] Live heartbeat: http://${HOST_IP}:${HTTP_PORT}/devices-ui`);
-    }
-
-    // 2. Publish to Vercel endpoint if configured
+    // 2. Publish directly to Vercel API endpoint
     if (LIVE_WRAPPER_URL) {
       try {
         await fetch(`${LIVE_WRAPPER_URL.replace(/\/$/, '')}/api/announce`, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: bodyStr,
-          signal: AbortSignal.timeout(3000)
+          signal: AbortSignal.timeout(2500)
         });
       } catch (err) {}
     }
+
+    // 3. Publish to direct cloud registry fallback
+    try {
+      await fetch('https://api.restful-api.dev/objects/ff808181a09d98f701a0bd4a36264d98', {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          name: 'file-transfer-active-host',
+          data: payload
+        }),
+        signal: AbortSignal.timeout(2500)
+      });
+    } catch (e) {}
+
+    if (isActive && !announcedOnce) {
+      announcedOnce = true;
+      console.log(`[CLOUD-LOBBY] Network lobby active on: ${topics.join(', ')} (${publishedRelay || 'relays'})`);
+      console.log(`[CLOUD-LOBBY] Live heartbeat: http://${HOST_IP}:${HTTP_PORT}/devices-ui`);
+    }
   }
 
-  // Send live heartbeat every 12 seconds while engine is running
+  // Send live heartbeat immediately and every 3 seconds while engine is running
   announceToLiveWrapper(true);
-  const heartbeatTimer = setInterval(() => announceToLiveWrapper(true), 12000);
+  const heartbeatTimer = setInterval(() => announceToLiveWrapper(true), 3000);
 
   // Clean shutdown: mark host offline in cloud lobby immediately
   async function markOffline() {
     if (heartbeatTimer) clearInterval(heartbeatTimer);
     try {
       const pubIp = cachedPublicIp || await getPublicIp();
-      const topic = getNetworkTopic(pubIp);
+      const topics = getNetworkTopics(pubIp);
       const data = JSON.stringify({ active: false, hostIp: HOST_IP, timestamp: 0 });
-      for (const relay of CLOUD_RELAYS) {
+
+      // Mark offline on Vercel
+      if (LIVE_WRAPPER_URL) {
         try {
-          await fetch(relay + '/' + topic, {
+          await fetch(`${LIVE_WRAPPER_URL.replace(/\/$/, '')}/api/announce`, {
             method: 'POST',
-            headers: { 'Title': 'FileTransfer Host Offline' },
+            headers: { 'Content-Type': 'application/json' },
             body: data,
-            signal: AbortSignal.timeout(2000)
+            signal: AbortSignal.timeout(1500)
           });
-        } catch(e) {}
+        } catch (e) {}
+      }
+
+      // Mark offline on cloud registry
+      try {
+        await fetch('https://api.restful-api.dev/objects/ff808181a09d98f701a0bd4a36264d98', {
+          method: 'PUT',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            name: 'file-transfer-active-host',
+            data: { active: false, timestamp: 0 }
+          }),
+          signal: AbortSignal.timeout(1500)
+        });
+      } catch (e) {}
+
+      // Mark offline on relays
+      for (const topic of topics) {
+        for (const relay of CLOUD_RELAYS) {
+          try {
+            await fetch(relay + '/' + topic, {
+              method: 'POST',
+              headers: { 'Title': 'FileTransfer Host Offline' },
+              body: data,
+              signal: AbortSignal.timeout(1500)
+            });
+          } catch(e) {}
+        }
       }
     } catch(e) {}
   }

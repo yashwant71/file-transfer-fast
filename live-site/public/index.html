@@ -504,26 +504,13 @@
           </div>
         </section>
 
-        <!-- SUB-STATE B: Host Found! (Smart Device Role Detection) -->
+        <!-- SUB-STATE B: Host Found! -->
         <section id="stateHostFound" class="state-view hidden">
           <div class="icon-circle success">
-            <span id="hostIcon">💻</span>
+            <span id="hostIcon">⚡</span>
           </div>
           <h1 class="title" id="hostFoundTitle">Host Device Found!</h1>
           <p class="subtitle" id="hostFoundSubtitle">Connected on your local network & ready to transfer.</p>
-
-          <!-- Device Role Selector (Host PC vs Mobile Phone) -->
-          <div class="role-selector" id="roleSelector">
-            <span class="role-label">Which device is this?</span>
-            <div class="role-pills">
-              <button type="button" class="role-pill active" id="roleHostBtn">
-                <span>💻</span> Host PC
-              </button>
-              <button type="button" class="role-pill" id="roleClientBtn">
-                <span>📱</span> Phone / Client
-              </button>
-            </div>
-          </div>
 
           <div class="host-card">
             <div class="host-header-line">
@@ -531,16 +518,15 @@
               <span class="host-badge" id="foundHostBadge">ONLINE</span>
             </div>
             <div class="host-ip" id="foundHostIp">10.14.0.243:8001</div>
+            <div id="foundHostNetworks" style="display:none;margin-top:0.6rem;padding:0.5rem 0.6rem;background:rgba(0,0,0,0.25);border-radius:8px;text-align:left;font-size:0.75rem;"></div>
           </div>
 
-          <a id="connectDirectBtn" href="#" class="btn btn-primary">
-            ⚡ Connect to Host & Transfer Files &rarr;
+          <a id="connectDirectBtn" href="#" class="btn btn-primary" style="font-size: 1.05rem; padding: 0.85rem 1.25rem;">
+            ⚡ Connect & Send Files &rarr;
           </a>
-          <a id="selfHostBtn" href="http://localhost:8001/devices-ui" class="btn btn-primary hidden">
-            📂 Open Host Dashboard & Transfer Files &rarr;
-          </a>
-          <p class="subtitle" id="hostFooterNote" style="font-size: 0.78rem; margin-top: 0.5rem;">
-            Zero installation required. Transfers directly over Wi-Fi at max speed.
+
+          <p class="subtitle" id="hostFooterNote" style="font-size: 0.78rem; margin-top: 0.6rem;">
+            Zero installation required. Transfers directly over your Wi-Fi or Hotspot.
           </p>
         </section>
 
@@ -617,6 +603,6 @@
     </footer>
   </div>
 
-  <script src="app.js"></script>
+  <script src="app.js?v=4"></script>
 </body>
 </html>

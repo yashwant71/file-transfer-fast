@@ -1,4 +1,4 @@
-// live-site/public/app.js — Network-Isolated Instant Host Discovery & 1-Click Connect
+// live-site/public/app.js — Instant Real-Time Host Discovery & Direct HTTP Connect
 (function() {
   const tabFind = document.getElementById('tabFind');
   const tabHost = document.getElementById('tabHost');
@@ -15,36 +15,35 @@
   const foundHostName = document.getElementById('foundHostName');
   const foundHostBadge = document.getElementById('foundHostBadge');
   const foundHostIp = document.getElementById('foundHostIp');
+  const foundHostNetworks = document.getElementById('foundHostNetworks');
   const connectDirectBtn = document.getElementById('connectDirectBtn');
-  const selfHostBtn = document.getElementById('selfHostBtn');
   const hostFooterNote = document.getElementById('hostFooterNote');
   const rescanBtn = document.getElementById('rescanBtn');
 
   const manualIpInput = document.getElementById('manualIpInput');
   const manualConnectBtn = document.getElementById('manualConnectBtn');
 
-  const roleSelector = document.getElementById('roleSelector');
-  const roleHostBtn = document.getElementById('roleHostBtn');
-  const roleClientBtn = document.getElementById('roleClientBtn');
-
   let publicIp = null;
-  let networkTopic = null;
   let currentHostData = null;
+  let isChecking = false;
+  let eventSource = null;
 
   // Tab switching
-  tabFind.addEventListener('click', () => {
-    tabFind.classList.add('active');
-    tabHost.classList.remove('active');
-    viewFind.classList.remove('hidden');
-    viewHost.classList.add('hidden');
-  });
+  if (tabFind && tabHost) {
+    tabFind.addEventListener('click', () => {
+      tabFind.classList.add('active');
+      tabHost.classList.remove('active');
+      viewFind.classList.remove('hidden');
+      viewHost.classList.add('hidden');
+    });
 
-  tabHost.addEventListener('click', () => {
-    tabHost.classList.add('active');
-    tabFind.classList.remove('active');
-    viewHost.classList.remove('hidden');
-    viewFind.classList.add('hidden');
-  });
+    tabHost.addEventListener('click', () => {
+      tabHost.classList.add('active');
+      tabFind.classList.remove('active');
+      viewHost.classList.remove('hidden');
+      viewFind.classList.add('hidden');
+    });
+  }
 
   function showFindState(state) {
     stateScanning.classList.add('hidden');
@@ -56,191 +55,248 @@
     else if (state === 'no_host') stateNoHost.classList.remove('hidden');
   }
 
-  // Get current device's public IP
+  // Get current device's public IPv4 address
   async function resolvePublicIp() {
     if (publicIp) return publicIp;
-    try {
-      const res = await fetch('https://api.ipify.org?format=json', { signal: AbortSignal.timeout(3000) });
-      if (res.ok) {
-        const json = await res.json();
-        publicIp = json.ip;
-        networkTopic = 'ftf-net-' + publicIp.replace(/[^a-zA-Z0-9]/g, '_');
-        return publicIp;
-      }
-    } catch(e) {}
-    try {
-      const res = await fetch('https://icanhazip.com', { signal: AbortSignal.timeout(3000) });
-      if (res.ok) {
-        publicIp = (await res.text()).trim();
-        networkTopic = 'ftf-net-' + publicIp.replace(/[^a-zA-Z0-9]/g, '_');
-        return publicIp;
-      }
-    } catch(e) {}
-    networkTopic = 'ftf-net-default';
+    const providers = [
+      'https://api4.ipify.org?format=json',
+      'https://api.ipify.org?format=json',
+      'https://ipv4.icanhazip.com'
+    ];
+    for (const url of providers) {
+      try {
+        const res = await fetch(url, { signal: AbortSignal.timeout(2000) });
+        if (res.ok) {
+          let ip = '';
+          if (url.includes('json')) {
+            const json = await res.json();
+            ip = json.ip;
+          } else {
+            ip = (await res.text()).trim();
+          }
+          if (ip && ip.includes('.')) {
+            publicIp = ip;
+            return publicIp;
+          }
+        }
+      } catch(e) {}
+    }
     return null;
   }
 
-  // Role switching
-  if (roleHostBtn && roleClientBtn) {
-    roleHostBtn.addEventListener('click', () => applyDeviceRole('host'));
-    roleClientBtn.addEventListener('click', () => applyDeviceRole('client'));
-  }
-
-  function applyDeviceRole(role) {
-    if (!currentHostData) return;
-    try { localStorage.setItem('ftf_role', role); } catch(e) {}
-
-    if (role === 'host') {
-      if (roleHostBtn) roleHostBtn.classList.add('active');
-      if (roleClientBtn) roleClientBtn.classList.remove('active');
-
-      hostFoundTitle.textContent = '🟢 You are Hosting!';
-      hostFoundSubtitle.textContent = 'Your transfer engine is active and running on this PC.';
-      foundHostName.textContent = 'This Device (Host PC)';
-      foundHostBadge.textContent = 'HOSTING ACTIVE';
-      foundHostBadge.style.background = 'rgba(16, 185, 129, 0.2)';
-      foundHostBadge.style.color = '#10b981';
-      foundHostIp.textContent = currentHostData.hostIp + ':' + currentHostData.port + ' (Local Engine)';
-
-      selfHostBtn.classList.remove('hidden');
-      selfHostBtn.href = 'http://localhost:' + currentHostData.port + '/devices-ui';
-      selfHostBtn.textContent = '📂 Open Host Dashboard & Transfer Files →';
-      connectDirectBtn.classList.add('hidden');
-
-      hostFooterNote.innerHTML = '📱 <b>To connect your Phone:</b> Open <code style="background:rgba(255,255,255,0.1);padding:2px 6px;border-radius:4px">live-site-pi.vercel.app</code> on your phone — it connects automatically!';
-    } else {
-      if (roleClientBtn) roleClientBtn.classList.add('active');
-      if (roleHostBtn) roleHostBtn.classList.remove('active');
-
-      hostFoundTitle.textContent = 'Host Device Found!';
-      hostFoundSubtitle.textContent = 'Connected on your local Wi-Fi & ready to transfer.';
-      foundHostName.textContent = currentHostData.name || 'Host PC';
-      foundHostBadge.textContent = 'ONLINE';
-      foundHostBadge.style.background = 'rgba(59, 130, 246, 0.2)';
-      foundHostBadge.style.color = '#60a5fa';
-      foundHostIp.textContent = currentHostData.hostIp + ':' + currentHostData.port;
-
-      connectDirectBtn.classList.remove('hidden');
-      connectDirectBtn.href = 'http://' + currentHostData.hostIp + ':' + currentHostData.port + '/devices-ui';
-      connectDirectBtn.textContent = '⚡ Connect to Host & Transfer Files →';
-      selfHostBtn.classList.add('hidden');
-
-      hostFooterNote.textContent = 'Transfers directly over your local Wi-Fi at max speed. Zero installation required.';
+  function getNetworkTopics(ip) {
+    const topics = ['ftf-hotspot-active'];
+    if (!ip) return topics;
+    const clean = ip.replace(/[^a-zA-Z0-9]/g, '_');
+    topics.push('ftf-net-' + clean);
+    const parts = ip.split('.');
+    if (parts.length === 4) {
+      topics.push('ftf-sub-' + parts[0] + '_' + parts[1] + '_' + parts[2]);
     }
+    return topics;
   }
 
-  function displayHostFound(hostIp, port, name) {
-    currentHostData = { hostIp, port, name };
+  function displayHostFound(hostIp, port, name, allIps) {
+    const primaryIp = hostIp || '127.0.0.1';
+    const targetPort = port || 8001;
+    const hostName = name || 'Host PC';
+
+    currentHostData = {
+      hostIp: primaryIp,
+      port: targetPort,
+      httpPort: targetPort,
+      deviceName: hostName,
+      allIps: allIps || [{ name: 'Wi-Fi', address: primaryIp }]
+    };
+
     showFindState('found');
     netStatus.innerHTML = '<span class="dot" style="background:#10b981"></span> Host Ready';
 
-    // Smart role detection
-    const isMobileDevice = /Android|iPhone|iPad|iPod|Mobile/i.test(navigator.userAgent);
-    let storedRole = null;
-    try { storedRole = localStorage.getItem('ftf_role'); } catch(e) {}
+    hostFoundTitle.textContent = 'Host Device Found!';
+    hostFoundSubtitle.textContent = 'Connected on your Wi-Fi or Hotspot & ready to transfer.';
+    foundHostName.textContent = hostName;
+    foundHostBadge.textContent = 'ONLINE';
+    foundHostBadge.style.background = 'rgba(16, 185, 129, 0.2)';
+    foundHostBadge.style.color = '#10b981';
+    foundHostIp.textContent = primaryIp + ':' + targetPort;
 
-    let initialRole = 'client';
-    if (paramRole === 'host' || window.location.hostname === 'localhost' || window.location.hostname === '127.0.0.1') {
-      initialRole = 'host';
-    } else if (storedRole === 'host' || storedRole === 'client') {
-      initialRole = storedRole;
-    } else if (isMobileDevice) {
-      initialRole = 'client'; // Phone visiting site is a client
-    } else {
-      // Desktop PC on the same Wi-Fi as host engine defaults to host
-      initialRole = 'host';
+    // Connect Button takes user directly to HTTP device UI where files are sent/received
+    connectDirectBtn.classList.remove('hidden');
+    connectDirectBtn.href = 'http://' + primaryIp + ':' + targetPort + '/devices-ui';
+    connectDirectBtn.textContent = '⚡ Connect & Send Files →';
+
+    hostFooterNote.textContent = 'Transfers directly over your local Wi-Fi / Hotspot at maximum speed.';
+
+    // Render connected network list if multiple
+    if (foundHostNetworks) {
+      if (Array.isArray(currentHostData.allIps) && currentHostData.allIps.length > 0) {
+        let netHtml = '<div style="font-weight:600;margin-bottom:4px;color:#cbd5e1;">📶 Connected Networks:</div>';
+        currentHostData.allIps.forEach(net => {
+          const isPrimary = net.address === primaryIp;
+          netHtml += `<div style="display:flex;justify-content:space-between;align-items:center;padding:3px 0;border-top:1px solid rgba(255,255,255,0.06);">
+            <span>${net.name || 'Wi-Fi'}:</span>
+            <span style="font-family:monospace;color:${isPrimary ? '#38bdf8' : '#94a3b8'}">${net.address}:${targetPort} ${isPrimary ? '★' : ''}</span>
+          </div>`;
+        });
+        foundHostNetworks.innerHTML = netHtml;
+        foundHostNetworks.style.display = 'block';
+      } else {
+        foundHostNetworks.style.display = 'none';
+      }
     }
-
-    applyDeviceRole(initialRole);
   }
 
   // Check URL parameters first (e.g. ?host=10.14.0.243&port=8001&name=Host+PC)
   const urlParams = new URLSearchParams(window.location.search);
   const paramHost = urlParams.get('host');
   const paramPort = urlParams.get('port') || '8001';
-  const paramName = urlParams.get('name') || 'Host Device';
-  const paramRole = urlParams.get('role');
+  const paramName = urlParams.get('name') || 'Host PC';
 
   if (paramHost) {
     displayHostFound(paramHost, paramPort, paramName);
     return;
   }
 
-  // Network-isolated discovery
-  const CLOUD_RELAYS = [
-    'https://ntfy.envs.net',
-    'https://ntfy.sh'
-  ];
-  const HEARTBEAT_WINDOW_MS = 35000; // 35 seconds validity window
+  // Real-time Discovery Logic (Zero Refresh Needed)
+  async function checkActiveHost() {
+    if (isChecking) return;
+    isChecking = true;
 
-  async function discoverHost() {
-    await resolvePublicIp();
-    const topic = networkTopic || 'ftf-net-default';
-
-    for (const relay of CLOUD_RELAYS) {
+    try {
+      // 1. Try Vercel Serverless Function: /api/active-host
       try {
-        const resp = await fetch(relay + '/' + topic + '/json?poll=1&since=2m', {
+        const res = await fetch('/api/active-host', {
           cache: 'no-store',
-          signal: AbortSignal.timeout(3000)
+          signal: AbortSignal.timeout(2000)
         });
-        if (resp.ok) {
-          const text = await resp.text();
-          const lines = text.trim().split('\n').filter(Boolean);
-          // Look at the latest message
-          for (let i = lines.length - 1; i >= 0; i--) {
-            try {
-              const item = JSON.parse(lines[i]);
-              if (item.event === 'message' && item.message) {
-                const data = JSON.parse(item.message);
-                const now = Date.now();
-                const age = now - (data.timestamp || 0);
-
-                if (data.active === true && data.hostIp && age >= 0 && age < HEARTBEAT_WINDOW_MS) {
-                  console.log('[DISCOVERY] Active host found on', relay, ':', data.hostIp);
-                  displayHostFound(data.hostIp, data.httpPort || 8001, data.deviceName || 'Host PC');
-                  return;
-                }
-              }
-            } catch(e) {}
+        if (res.ok) {
+          const data = await res.json();
+          if (data && data.found === true && data.hostIp) {
+            displayHostFound(data.hostIp, data.httpPort, data.deviceName, data.allIps);
+            isChecking = false;
+            return;
           }
         }
       } catch(e) {}
-    }
 
-    // No active host found on this network
-    showFindState('no_host');
-    netStatus.innerHTML = '<span class="dot" style="background:#f59e0b"></span> No Host on Wi-Fi';
+      // 2. Try Direct Cloud Object Fallback
+      try {
+        const directRes = await fetch('https://api.restful-api.dev/objects/ff808181a09d98f701a0bd4a36264d98', {
+          cache: 'no-store',
+          signal: AbortSignal.timeout(2000)
+        });
+        if (directRes.ok) {
+          const directJson = await directRes.json();
+          const hostObj = directJson.data;
+          const age = Date.now() - (hostObj ? hostObj.timestamp || 0 : 0);
+          if (hostObj && hostObj.active === true && hostObj.hostIp && age >= 0 && age < 20000) {
+            displayHostFound(hostObj.hostIp, hostObj.httpPort, hostObj.deviceName, hostObj.allIps);
+            isChecking = false;
+            return;
+          }
+        }
+      } catch(e) {}
+
+      // 3. Try ntfy.sh Fast Polling
+      try {
+        const ip = await resolvePublicIp();
+        const topics = getNetworkTopics(ip);
+        for (const topic of topics) {
+          try {
+            const ntfyRes = await fetch('https://ntfy.sh/' + topic + '/json?poll=1', {
+              cache: 'no-store',
+              signal: AbortSignal.timeout(1800)
+            });
+            if (ntfyRes.ok) {
+              const text = await ntfyRes.text();
+              const lines = text.trim().split('\n').filter(Boolean);
+              for (let i = lines.length - 1; i >= 0; i--) {
+                try {
+                  const item = JSON.parse(lines[i]);
+                  if (item.event === 'message' && item.message) {
+                    const msgData = JSON.parse(item.message);
+                    const age = Date.now() - (msgData.timestamp || 0);
+                    if (msgData.active === true && msgData.hostIp && age >= 0 && age < 25000) {
+                      displayHostFound(msgData.hostIp, msgData.httpPort || 8001, msgData.deviceName || 'Host PC', msgData.allIps);
+                      isChecking = false;
+                      return;
+                    }
+                  }
+                } catch(e) {}
+              }
+            }
+          } catch(e) {}
+        }
+      } catch(e) {}
+
+      // If previously found but now offline, update dynamically without refresh
+      if (currentHostData) {
+        currentHostData = null;
+      }
+      showFindState('no_host');
+      netStatus.innerHTML = '<span class="dot" style="background:#f59e0b"></span> No Host on Wi-Fi';
+    } finally {
+      isChecking = false;
+    }
+  }
+
+  // Setup Real-Time Server-Sent Events (SSE) stream via ntfy.sh for 0ms instant trigger
+  function initEventSource() {
+    try {
+      if (eventSource) {
+        eventSource.close();
+      }
+      eventSource = new EventSource('https://ntfy.sh/ftf-hotspot-active/sse');
+      eventSource.onmessage = (event) => {
+        try {
+          const item = JSON.parse(event.data);
+          if (item && item.message) {
+            const data = JSON.parse(item.message);
+            const age = Date.now() - (data.timestamp || 0);
+            if (data.active === true && data.hostIp && age >= 0 && age < 25000) {
+              displayHostFound(data.hostIp, data.httpPort || 8001, data.deviceName || 'Host PC', data.allIps);
+            } else if (data.active === false) {
+              currentHostData = null;
+              showFindState('no_host');
+              netStatus.innerHTML = '<span class="dot" style="background:#f59e0b"></span> No Host on Wi-Fi';
+            }
+          }
+        } catch(e) {}
+      };
+      eventSource.onerror = () => {};
+    } catch(e) {}
   }
 
   // Manual IP connect
-  manualConnectBtn.addEventListener('click', () => {
-    let val = manualIpInput.value.trim();
-    if (!val) return;
-    if (!val.startsWith('http://') && !val.startsWith('https://')) {
-      val = 'http://' + val;
-    }
-    if (!val.includes('/devices-ui')) {
-      val = val.replace(/\/$/, '') + '/devices-ui';
-    }
-    window.location.href = val;
-  });
+  if (manualConnectBtn && manualIpInput) {
+    manualConnectBtn.addEventListener('click', () => {
+      let val = manualIpInput.value.trim();
+      if (!val) return;
+      if (!val.startsWith('http://') && !val.startsWith('https://')) {
+        val = 'http://' + val;
+      }
+      if (!val.includes('/devices-ui')) {
+        val = val.replace(/\/$/, '') + '/devices-ui';
+      }
+      window.location.href = val;
+    });
 
-  manualIpInput.addEventListener('keydown', (e) => {
-    if (e.key === 'Enter') manualConnectBtn.click();
-  });
+    manualIpInput.addEventListener('keydown', (e) => {
+      if (e.key === 'Enter') manualConnectBtn.click();
+    });
+  }
 
-  rescanBtn.addEventListener('click', () => {
-    showFindState('scanning');
-    netStatus.innerHTML = '<span class="dot pulse"></span> Searching...';
-    discoverHost();
-  });
+  if (rescanBtn) {
+    rescanBtn.addEventListener('click', () => {
+      showFindState('scanning');
+      netStatus.innerHTML = '<span class="dot pulse"></span> Searching...';
+      checkActiveHost();
+    });
+  }
 
-  // Initial discovery
+  // Start real-time stream & fast background polling (every 1.5 seconds)
+  initEventSource();
   showFindState('scanning');
-  discoverHost();
-
-  // Auto-poll every 3.5 seconds
-  setInterval(() => {
-    discoverHost();
-  }, 3500);
+  checkActiveHost();
+  setInterval(checkActiveHost, 1500);
 })();
