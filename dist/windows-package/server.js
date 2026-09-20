@@ -1090,10 +1090,11 @@ const requestHandler = (req, res) => {
         const deviceInfo = JSON.parse(body || '{}');
         const devIP = cleanIP(req.socket.remoteAddress);
         deviceInfo.ip = devIP;
-        // No IP-based host guessing — client declares itself.
-        // Back-compat: explicit "Host PC" name still counts as host.
+        // Self-declared host; same-machine (loopback or HOST_IP) is always host unless explicitly guest.
+        // No subnet/IP guessing — just client flag + localhost/HOST_IP.
         let isHost = !!deviceInfo.isHost;
         if (!isHost && deviceInfo.name === 'Host PC') isHost = true;
+        if (!isHost && (devIP === '127.0.0.1' || devIP === HOST_IP) && deviceInfo.isHost !== false) isHost = true;
         deviceInfo.isHost = isHost;
         if (isHost && (!deviceInfo.name || deviceInfo.name === 'My Device' || deviceInfo.name === 'Mobile Device')) {
           deviceInfo.name = 'Host PC';

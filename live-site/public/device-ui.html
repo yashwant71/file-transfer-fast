@@ -1,4 +1,4 @@
-<!-- FTF_VERSION: 1789902537983 -->
+<!-- FTF_VERSION: 1789903851783 -->
 <!-- FileTransferFast Device UI Live Source -->
 <!DOCTYPE html>
 <html>
@@ -177,6 +177,7 @@ var amIHost = (function() {
   } catch(e) { return false; }
 })();
 
+
 // --- State ---
 var devices = [];
 var isHostDevice = false;
@@ -283,7 +284,26 @@ function renderDevices() {
   var list = me ? [me].concat(others) : others;
   var meName = me ? me.name : myDeviceName;
   var meHost = me ? !!me.isHost : amIHost;
-  if (selfInfo) selfInfo.textContent = meName + (meHost ? ' · host' : '') + ' · you';
+  if (selfInfo) {
+    selfInfo.textContent = '';
+    var t = document.createTextNode(meName + (meHost ? ' · host' : '') + ' · you');
+    selfInfo.appendChild(t);
+    if (!meHost) {
+      var a = document.createElement('a');
+      a.href = '#';
+      a.textContent = 'Make me host';
+      a.style.marginLeft = '6px';
+      a.style.color = '#fff';
+      a.style.fontSize = '11px';
+      a.style.textDecoration = 'underline';
+      a.onclick = function(ev){ ev.preventDefault(); amIHost=true; try{localStorage.setItem('ftIsHost','1');}catch(e){} registerDevice(); };
+      selfInfo.appendChild(document.createTextNode(' '));
+      selfInfo.appendChild(a);
+    } else if (amIHost && me && !me.isHost) {
+      // server hasn't synced yet — re-register as host
+      amIHost=true; try{localStorage.setItem('ftIsHost','1');}catch(e){}
+    }
+  }
   deviceList.innerHTML = '';
   if (!list.length) {
     deviceList.innerHTML = '<div class="empty">No devices yet — open this page on another device on the same Wi-Fi.</div>';

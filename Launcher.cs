@@ -133,7 +133,7 @@ namespace FileTransferFast
 
                 try
                 {
-                    Process.Start("http://localhost:8001/devices-ui");
+                    Process.Start("http://localhost:8001/devices-ui?role=host");
                 }
                 catch { }
             });
@@ -308,7 +308,7 @@ namespace FileTransferFast
             btnOpen.Size = new Size(160, 38);
             btnOpen.Cursor = Cursors.Hand;
             btnOpen.Click += delegate {
-                try { Process.Start("http://localhost:8001/devices-ui"); } catch { }
+                try { Process.Start("http://localhost:8001/devices-ui?role=host"); } catch { }
             };
             this.Controls.Add(btnOpen);
 
