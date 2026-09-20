@@ -1,6 +1,6 @@
 @echo off
 cd /d "%~dp0"
-title File Transfer Fast - Starting...
+title File Transfer Fast - Live Engine Logs
 echo ========================================================
 echo        File Transfer Fast - Local Engine
 echo ========================================================
@@ -17,18 +17,15 @@ if %errorlevel% neq 0 (
 )
 
 echo Starting local engine on ports 8001 (HTTP) and 8443 (HTTPS)...
-start /b "" node "%~dp0server.js"
+echo Logs will appear live below. Press Ctrl+C or close this window to stop.
+echo.
 
-:: Wait a brief moment for server to bind
-timeout /t 2 /nobreak >nul
+:: Automatically open browser once port 8001 is ready
+start "" powershell -NoProfile -Command "$w = 0; while ($w -lt 20) { try { $r = Invoke-WebRequest -Uri 'http://localhost:8001/devices-ui' -UseBasicParsing -TimeoutSec 1; if ($r.StatusCode -eq 200) { break } } catch { Start-Sleep -Milliseconds 250; $w++ } }; Start-Process 'http://localhost:8001/devices-ui'"
 
-echo Opening File Transfer UI in your default browser...
-start http://localhost:8001/devices-ui
+:: Run Node directly in foreground so all logs are visible live in this window
+node "%~dp0server.js"
 
 echo.
-echo ========================================================
-echo Engine is running! You can minimize this window.
-echo To stop the engine, close this window or run stop-app.bat
-echo ========================================================
-echo.
+echo Engine stopped.
 pause

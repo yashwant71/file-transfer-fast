@@ -55,6 +55,53 @@ if (!fs.existsSync(TRANSFERS_DIR)) fs.mkdirSync(TRANSFERS_DIR, { recursive: true
 // Performance: increase UV threadpool for concurrent file I/O
 process.env.UV_THREADPOOL_SIZE = '16';
 
+const DEFAULT_CERT = `-----BEGIN CERTIFICATE-----
+MIICzDCCAbSgAwIBAgIJFxDPOhirXAZzMA0GCSqGSIb3DQEBBQUAMBgxFjAUBgNV
+BAMTDTE5Mi4xNjguMTM3LjEwHhcNMjYwNzA1MDYwMDA3WhcNMjcwNzA1MDYwMDA3
+WjAYMRYwFAYDVQQDEw0xOTIuMTY4LjEzNy4xMIIBIjANBgkqhkiG9w0BAQEFAAOC
+AQ8AMIIBCgKCAQEAkD26N/khXiU/dvT19NGw7bkhEc2cweWCs5hNN3rTZHKuUiX+
+IWCIyo/0m3lRCwhf865yMWwRpdTPwXivgj+GgTlfaAng+zMo+BhaOyFUDWFpOd7F
+vd4SPbHHbqHsXoALAWLnjS9Mv7FNjWPdPClYdNf3YvjS2cahwCQXUmBzdWKTd64/
+R2Bdc6Ed+lBp/ug/i2+gOz8E8WR8o9CbwlhC49UqyTusAqUeE4hCOSiU6JhIjj5/
+tH0rnXvNPOybUGDM4Dewqflq35VaqXRELuw4iQsqg4Tm0pf59Rh/WUYYtonCWUAo
+JNTV+wiL/0KYVKjZRuUoWFw7df+Zf/p977JXIwIDAQABoxkwFzAVBgNVHREEDjAM
+hwTAqIkBhwR/AAABMA0GCSqGSIb3DQEBBQUAA4IBAQAEdRC66ZyjHyKRS68PZ6j7
+hLXve9Y5DzEe+2/2eUqO+YZ+ZqOT7Z0y7AfGzypSyV9ZsLCm1HbL//Wfe2V4w2Os
+I07yLdHF/LBnmPD4avxeO1QDNpMJIcLeDod8IhnaePUyjqIDiSbV7b4hRcO6Y0+v
+lPzdRZp/ttLVjMVtFo5uqbJZHO/vhLp/KAOGjOmBxueICKTMP0beTcZ1Yd++goXV
+78PPbMgJYizY9Swy19bVhCWFZ+SXIN2vEdLVy7WftW0goJ6iPxaeTe8sR0uW9mHu
+FjkRX7vMOFFoXgyYdR7fjTuGUtLbquQIYr3tC4h0GCFig6XoTw2j+7xIS46X+fiM
+-----END CERTIFICATE-----`;
+
+const DEFAULT_KEY = `-----BEGIN PRIVATE KEY-----
+MIIEvgIBADANBgkqhkiG9w0BAQEFAASCBKgwggSkAgEAAoIBAQCQPbo3+SFeJT92
+9PX00bDtuSERzZzB5YKzmE03etNkcq5SJf4hYIjKj/SbeVELCF/zrnIxbBGl1M/B
+eK+CP4aBOV9oCeD7Myj4GFo7IVQNYWk53sW93hI9scduoexegAsBYueNL0y/sU2N
+Y908KVh01/di+NLZxqHAJBdSYHN1YpN3rj9HYF1zoR36UGn+6D+Lb6A7PwTxZHyj
+0JvCWELj1SrJO6wCpR4TiEI5KJTomEiOPn+0fSude8087JtQYMzgN7Cp+WrflVqp
+dEQu7DiJCyqDhObSl/n1GH9ZRhi2icJZQCgk1NX7CIv/QphUqNlG5ShYXDt1/5l/
++n3vslcjAgMBAAECggEARm9GGGAY2bLBp3KeClM9HRCaY+muIwbSiKWWC0H4qSPR
+GP9BdgYANj4Omb8ngoYv6LwmOhkGEx705opq1eT0ZvTfsFuml7PXTTMDGL3BIBmR
+uzccA4fGC4ddFhqO5GSNOzuTS5+t0Cuh7am21lJwRfpR7OwJdlunD77v/oNnzgk9
+wXHO2QiB5fbXWF0njYhFvTOmJFJTe80NHpnj7P0NVc5s8NL/CnAWbySbSmqHq64+
+u75HLZTGVAlH5kemVYfQkyrpBzdcSF7ZBtDRD0RDhfotnvTX+YxA8vBaRavTELi8
+NrXMF6crsmaYXINRkdDfg6uiK2l0uajWHJdD8zjHKQKBgQDBj+/W3qrR+x44mZz0
+sM3juIABrJ856vG+HWRfFMOu3/fRNrvCNjF1UKl3qFI+BetKdZoXNbmLapE90EBK
+H/U7XhMj2msP12oqBx323cyeb7rIobUkGfemACJdI1wGIf8o7PRLcn9QosAMERRL
+h4srHsuCEk2VoXKU8l6stYa46QKBgQC+xO4T6bNC8+AxuePZ4jyeKsADKFIIXxKx
+P7hiAxkOp5b7PdvY4GGW8+f3kvZof5aSLUGrJKGvZjMKAqxJycyMR+paX6pr4Xh/
+K7IVdu8UVNb4ltd6APV0DYZuw7HKhHrx7rvrPm7aIz2yzz7vHY/mln+WOf9FmdKs
+lq9X67oIKwKBgE1HHxUlHwPogx9LzQswD3NMNOb2OTfRYiRp7am8S4fk6TbA6GNY
+aZSR2KbqL7ONf2vh2dxMWcCcklIgc5pkee7y1ydoS3guo7cV0lO+J7RVnTf+v6gj
+Kek/gni25kWYixuWxs3cb5IM+CmZJAYnnltf1xYeIpWLuIhY342Kh7gJAoGBAK0a
+bR5MlYlPWkRE9WgkTfUHvawfzjAidQe5Vko5nWca03mvK+qj0Gn1cKvKAyXXgH2r
+60asuro59l5DBqr+Hkm8h/7xh+bUdU6QC8xGW7MLOPXhiiz+6bsg+rdPg+jMRfN6
+ObLAuD3gdH/oZqb7IDSQo71hay1w4yYQpZMWJ3x5AoGBAJlHz0M+OICYL0NuUMP2
+RjexwxnozxdrDisPkkpvF9d7GZQtjwNMWR9nYHTLtZPym3vgInPWT5yiTNbpZChN
+DmhjoWX2TX9rhUif3XIZq+Rj0Mo5Y8gVGe7Cqk40SIKLOlsf/ZjHAR9Xuri1/Sgv
+XTAbfNNQabnYIuOJ0iSVvgIW
+-----END PRIVATE KEY-----`;
+
 // Generate or load self-signed certificate (async API in newer selfsigned)
 async function getTlsOptions() {
   const certFile = path.join(CERT_DIR, 'cert.pem');
@@ -63,27 +110,40 @@ async function getTlsOptions() {
     console.log('[HTTPS] Using cached certificate');
     return { cert: fs.readFileSync(certFile), key: fs.readFileSync(keyFile) };
   }
-  console.log('[HTTPS] Generating self-signed certificate (one time)...');
-  const selfsigned = require('selfsigned');
-  const attrs = [{ name: 'commonName', value: HOST_IP }];
-  const altNames = [{ type: 7, ip: HOST_IP }, { type: 7, ip: '127.0.0.1' }];
-  for (const item of getAllLocalIPs()) {
-    if (item.address !== HOST_IP && item.address !== '127.0.0.1') {
-      altNames.push({ type: 7, ip: item.address });
+  
+  // Try generating via selfsigned module if available
+  try {
+    const selfsigned = require('selfsigned');
+    console.log('[HTTPS] Generating self-signed certificate...');
+    const attrs = [{ name: 'commonName', value: HOST_IP }];
+    const altNames = [{ type: 7, ip: HOST_IP }, { type: 7, ip: '127.0.0.1' }];
+    for (const item of getAllLocalIPs()) {
+      if (item.address !== HOST_IP && item.address !== '127.0.0.1') {
+        altNames.push({ type: 7, ip: item.address });
+      }
     }
+    const pems = await selfsigned.generate(attrs, {
+      days: 3650,
+      keySize: 2048,
+      extensions: [{ name: 'subjectAltName', altNames }]
+    });
+    const certPem = pems.cert || pems.certificate;
+    const keyPem = pems.private || pems.privateKey || pems.key;
+    try {
+      fs.writeFileSync(certFile, certPem);
+      fs.writeFileSync(keyFile, keyPem);
+    } catch(e) {}
+    console.log('[HTTPS] Certificate generated and cached');
+    return { cert: certPem, key: keyPem };
+  } catch (err) {
+    // Fallback: use built-in self-signed certificate (Zero external npm dependency!)
+    console.log('[HTTPS] Using built-in self-signed TLS certificate');
+    try {
+      fs.writeFileSync(certFile, DEFAULT_CERT);
+      fs.writeFileSync(keyFile, DEFAULT_KEY);
+    } catch(e) {}
+    return { cert: DEFAULT_CERT, key: DEFAULT_KEY };
   }
-  const pems = await selfsigned.generate(attrs, {
-    days: 3650,
-    keySize: 2048,
-    extensions: [{ name: 'subjectAltName', altNames }]
-  });
-  // newer selfsigned uses cert/private, older uses cert/private - check both
-  const certPem = pems.cert || pems.certificate;
-  const keyPem = pems.private || pems.privateKey || pems.key;
-  fs.writeFileSync(certFile, certPem);
-  fs.writeFileSync(keyFile, keyPem);
-  console.log('[HTTPS] Certificate generated and cached');
-  return { cert: certPem, key: keyPem };
 }
 
 let logEvents = [];
@@ -1443,51 +1503,58 @@ function validateBrowserJS() {
 validateBrowserJS();
 
 (async () => {
-  const tlsOptions = await getTlsOptions();
-  const httpsServer = https.createServer(tlsOptions, requestHandler);
-
-  // TCP optimizations for high throughput
-  httpsServer.keepAliveTimeout = 60000;
-  httpsServer.on('connection', (socket) => {
-    socket.setNoDelay(true);           // Disable Nagle's algorithm
-    socket.setKeepAlive(true, 60000);  // Keep connections alive
-  });
-
-  const allIPs = getAllLocalIPs();
-
-  httpsServer.listen(HTTPS_PORT, '0.0.0.0', () => {
-    console.log('='.repeat(55));
-    console.log('📱 CONNECTED DEVICES (PC & Mobile):');
-    console.log('   https://' + HOST_IP + ':' + HTTPS_PORT + '/devices-ui');
-    console.log('⚡ QUICK DIRECT UPLOAD:');
-    console.log('   https://' + HOST_IP + ':' + HTTPS_PORT + '/');
-    console.log('📊 STATUS DASHBOARD:');
-    console.log('   https://' + HOST_IP + ':' + HTTPS_PORT + '/status');
-    console.log('📂 SAVES TO: ' + saveDir);
-    if (allIPs.length > 1) {
-      console.log('Available network interfaces:');
-      allIPs.forEach(item => {
-        if (item.address !== HOST_IP) {
-          console.log('   https://' + item.address + ':' + HTTPS_PORT + '/devices-ui (' + item.name + ')');
-        }
-      });
-    }
-    console.log('🌐 VERCEL LINK FOR OTHER DEVICES (Phones / Mac):');
-    console.log('   https://live-site-pi.vercel.app/?host=' + HOST_IP + '&port=' + HTTP_PORT + '&name=Host+PC');
-    console.log('='.repeat(55));
-    addLog('Server started (HTTPS:' + HTTPS_PORT + ' HTTP:' + HTTP_PORT + ')', 'info');
-  });
-
-  // TCP optimizations for HTTP too
+  // TCP optimizations for HTTP
   httpServer.keepAliveTimeout = 60000;
   httpServer.on('connection', (socket) => {
     socket.setNoDelay(true);
     socket.setKeepAlive(true, 60000);
   });
 
+  // Start HTTP engine immediately on port 8001
   httpServer.listen(HTTP_PORT, '0.0.0.0', () => {
-    console.log('[HTTP] Fallback on http://' + HOST_IP + ':' + HTTP_PORT + '/devices-ui');
+    console.log('[HTTP] Engine active on http://' + HOST_IP + ':' + HTTP_PORT + '/devices-ui');
+    console.log('[HTTP] Local access: http://localhost:' + HTTP_PORT + '/devices-ui');
+    addLog('Server started (HTTP:' + HTTP_PORT + ')', 'info');
   });
+
+  const allIPs = getAllLocalIPs();
+
+  try {
+    const tlsOptions = await getTlsOptions();
+    const httpsServer = https.createServer(tlsOptions, requestHandler);
+
+    // TCP optimizations for high throughput
+    httpsServer.keepAliveTimeout = 60000;
+    httpsServer.on('connection', (socket) => {
+      socket.setNoDelay(true);           // Disable Nagle's algorithm
+      socket.setKeepAlive(true, 60000);  // Keep connections alive
+    });
+
+    httpsServer.listen(HTTPS_PORT, '0.0.0.0', () => {
+      console.log('='.repeat(55));
+      console.log('📱 CONNECTED DEVICES (PC & Mobile):');
+      console.log('   https://' + HOST_IP + ':' + HTTPS_PORT + '/devices-ui');
+      console.log('⚡ QUICK DIRECT UPLOAD:');
+      console.log('   https://' + HOST_IP + ':' + HTTPS_PORT + '/');
+      console.log('📊 STATUS DASHBOARD:');
+      console.log('   https://' + HOST_IP + ':' + HTTPS_PORT + '/status');
+      console.log('📂 SAVES TO: ' + saveDir);
+      if (allIPs.length > 1) {
+        console.log('Available network interfaces:');
+        allIPs.forEach(item => {
+          if (item.address !== HOST_IP) {
+            console.log('   https://' + item.address + ':' + HTTPS_PORT + '/devices-ui (' + item.name + ')');
+          }
+        });
+      }
+      console.log('🌐 VERCEL LINK FOR OTHER DEVICES (Phones / Mac):');
+      console.log('   https://live-site-pi.vercel.app/?host=' + HOST_IP + '&port=' + HTTP_PORT + '&name=Host+PC');
+      console.log('='.repeat(55));
+      addLog('Secure server started (HTTPS:' + HTTPS_PORT + ')', 'info');
+    });
+  } catch (tlsErr) {
+    console.warn('[HTTPS] Note: HTTPS not active (' + tlsErr.message + '), HTTP active on port ' + HTTP_PORT);
+  }
 
   // Live Wrapper Announcement Hook (Dynamic Cloud Pairing)
   async function announceToLiveWrapper() {
