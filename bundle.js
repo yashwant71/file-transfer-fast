@@ -61,6 +61,8 @@ console.log('   ✔ Generated: dist/device-ui/manifest.json');
 // --- STEP 2: Package Windows Desktop App Bundle ---
 console.log('\n📦 Step 2: Packaging Windows Desktop App bundle (.zip)...');
 const winPkgDir = path.join(DIST_DIR, 'windows-package');
+try { fs.rmSync(winPkgDir, { recursive: true, force: true }); } catch(e) {}
+fs.mkdirSync(winPkgDir, { recursive: true });
 
 // Copy required files for the Windows bundle
 const filesToCopy = [
@@ -97,7 +99,6 @@ fs.writeFileSync(path.join(winPkgDir, 'README.txt'), readmeText, 'utf8');
 // Compress Windows bundle into live-site downloads
 const winZipPath = path.join(DOWNLOADS_DIR, 'file-transfer-windows.zip');
 try {
-  // Use PowerShell Compress-Archive on Windows
   if (process.platform === 'win32') {
     const psCmd = `powershell -NoProfile -Command "Compress-Archive -Path '${winPkgDir}\\*' -DestinationPath '${winZipPath}' -Force"`;
     execSync(psCmd, { stdio: 'inherit' });
@@ -105,7 +106,26 @@ try {
     console.log(`   ✔ Created: live-site/public/downloads/file-transfer-windows.zip (${(stat.size / 1024).toFixed(1)} KB)`);
   }
 } catch (err) {
-  console.warn('   ⚠ Could not create zip archive automatically:', err.message);
+  console.warn('   ⚠ Could not create Windows zip archive:', err.message);
+}
+
+// Package Mac & Linux bundle
+const macPkgDir = path.join(DIST_DIR, 'mac-linux-package');
+if (!fs.existsSync(macPkgDir)) fs.mkdirSync(macPkgDir, { recursive: true });
+['server.js', 'devices-client.js', 'client.js', 'package.json', 'start-app.sh', 'stop-app.sh'].forEach(f => {
+  const src = path.join(ROOT_DIR, f);
+  if (fs.existsSync(src)) fs.copyFileSync(src, path.join(macPkgDir, f));
+});
+const macZipPath = path.join(DOWNLOADS_DIR, 'file-transfer-mac-linux.zip');
+try {
+  if (process.platform === 'win32') {
+    const psCmd = `powershell -NoProfile -Command "Compress-Archive -Path '${macPkgDir}\\*' -DestinationPath '${macZipPath}' -Force"`;
+    execSync(psCmd, { stdio: 'inherit' });
+    const stat = fs.statSync(macZipPath);
+    console.log(`   ✔ Created: live-site/public/downloads/file-transfer-mac-linux.zip (${(stat.size / 1024).toFixed(1)} KB)`);
+  }
+} catch (err) {
+  console.warn('   ⚠ Could not create Mac/Linux zip archive:', err.message);
 }
 
 // --- STEP 3: Package Mobile Web Bundle ---

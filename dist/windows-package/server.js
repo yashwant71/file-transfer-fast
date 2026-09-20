@@ -44,7 +44,7 @@ function cleanIP(ip) {
 
 const HOST_IP = getLocalIP();
 let activePin = null;
-const LIVE_WRAPPER_URL = process.env.LIVE_WRAPPER_URL || null;
+const LIVE_WRAPPER_URL = process.env.LIVE_WRAPPER_URL || 'https://live-site-pi.vercel.app';
 let saveDir = path.join(os.homedir(), 'File Transfer');
 const CERT_DIR = path.join(__dirname, '.cert');
 const TRANSFERS_DIR = path.join(saveDir, '.transfers');
@@ -1472,7 +1472,8 @@ validateBrowserJS();
         }
       });
     }
-    console.log('NOTE: Accept the certificate warning on first visit');
+    console.log('🌐 VERCEL LINK FOR OTHER DEVICES (Phones / Mac):');
+    console.log('   https://live-site-pi.vercel.app/?host=' + HOST_IP + '&port=' + HTTP_PORT + '&name=Host+PC');
     console.log('='.repeat(55));
     addLog('Server started (HTTPS:' + HTTPS_PORT + ' HTTP:' + HTTP_PORT + ')', 'info');
   });

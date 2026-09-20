@@ -3,11 +3,386 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>Fast File Transfer — Connecting</title>
-  <link rel="stylesheet" href="style.css">
+  <title>Fast File Transfer — Local Wi-Fi Sharing</title>
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
   <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+  <style>
+    /* Inlined Bulletproof CSS — Always renders perfectly anywhere */
+    :root {
+      --bg-primary: #090d16;
+      --bg-secondary: #131b2e;
+      --bg-card: rgba(26, 36, 61, 0.85);
+      --border-color: rgba(255, 255, 255, 0.1);
+      --border-focus: #3b82f6;
+      --text-primary: #f8fafc;
+      --text-secondary: #94a3b8;
+      --text-dim: #64748b;
+      --accent-blue: #3b82f6;
+      --accent-blue-hover: #2563eb;
+      --accent-glow: rgba(59, 130, 246, 0.4);
+      --accent-green: #10b981;
+      --accent-amber: #f59e0b;
+      --accent-red: #ef4444;
+    }
+
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+
+    body {
+      font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+      background-color: var(--bg-primary);
+      background-image: 
+        radial-gradient(at 0% 0%, rgba(37, 99, 235, 0.18) 0px, transparent 50%),
+        radial-gradient(at 100% 100%, rgba(16, 185, 129, 0.12) 0px, transparent 50%);
+      background-attachment: fixed;
+      color: var(--text-primary);
+      min-height: 100vh;
+      display: flex;
+      justify-content: center;
+      align-items: center;
+      padding: 1.5rem;
+    }
+
+    .container {
+      width: 100%;
+      max-width: 520px;
+      display: flex;
+      flex-direction: column;
+      gap: 1.25rem;
+    }
+
+    /* Header */
+    .header {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      padding: 0.5rem 0;
+    }
+
+    .logo {
+      display: flex;
+      align-items: center;
+      gap: 0.5rem;
+    }
+
+    .logo-icon { font-size: 1.5rem; }
+    .logo-text { font-size: 1.15rem; letter-spacing: -0.02em; color: var(--text-primary); }
+    .logo-text b { color: var(--accent-blue); }
+
+    .status-badge {
+      font-size: 0.8rem;
+      color: var(--text-secondary);
+      background: var(--bg-secondary);
+      border: 1px solid var(--border-color);
+      padding: 0.35rem 0.75rem;
+      border-radius: 9999px;
+      display: flex;
+      align-items: center;
+      gap: 0.4rem;
+    }
+
+    .dot { width: 8px; height: 8px; border-radius: 50%; background-color: var(--accent-blue); }
+    .dot.pulse {
+      box-shadow: 0 0 0 0 rgba(59, 130, 246, 0.7);
+      animation: pulse-ring 1.8s infinite;
+    }
+
+    @keyframes pulse-ring {
+      0% { transform: scale(0.95); box-shadow: 0 0 0 0 rgba(59, 130, 246, 0.7); }
+      70% { transform: scale(1); box-shadow: 0 0 0 8px rgba(59, 130, 246, 0); }
+      100% { transform: scale(0.95); box-shadow: 0 0 0 0 rgba(59, 130, 246, 0); }
+    }
+
+    /* Main Card */
+    .main-card {
+      background: var(--bg-card);
+      backdrop-filter: blur(16px);
+      -webkit-backdrop-filter: blur(16px);
+      border: 1px solid var(--border-color);
+      border-radius: 24px;
+      padding: 2.25rem 2rem;
+      box-shadow: 0 20px 40px -15px rgba(0, 0, 0, 0.5);
+      text-align: center;
+    }
+
+    .hidden { display: none !important; }
+
+    .title {
+      font-size: 1.4rem;
+      font-weight: 700;
+      letter-spacing: -0.02em;
+      margin-bottom: 0.5rem;
+      color: var(--text-primary);
+    }
+
+    .subtitle {
+      font-size: 0.92rem;
+      color: var(--text-secondary);
+      line-height: 1.5;
+      margin-bottom: 1.5rem;
+    }
+
+    .icon-circle {
+      width: 64px;
+      height: 64px;
+      margin: 0.5rem auto 1.25rem auto;
+      border-radius: 50%;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      font-size: 1.8rem;
+    }
+
+    .icon-circle.success {
+      background: rgba(16, 185, 129, 0.15);
+      border: 1px solid rgba(16, 185, 129, 0.3);
+      color: var(--accent-green);
+    }
+
+    .icon-circle.scan {
+      background: rgba(59, 130, 246, 0.15);
+      border: 1px solid rgba(59, 130, 246, 0.3);
+      color: var(--accent-blue);
+    }
+
+    /* Spinners & Progress */
+    .spinner-wrapper {
+      margin: 1.5rem auto;
+      display: flex;
+      justify-content: center;
+    }
+
+    .spinner {
+      width: 44px;
+      height: 44px;
+      border: 3px solid rgba(59, 130, 246, 0.2);
+      border-top-color: var(--accent-blue);
+      border-radius: 50%;
+      animation: spin 0.9s linear infinite;
+    }
+
+    @keyframes spin { to { transform: rotate(360deg); } }
+
+    .progress-bar-container {
+      width: 100%;
+      height: 6px;
+      background: rgba(255, 255, 255, 0.08);
+      border-radius: 999px;
+      overflow: hidden;
+      margin-top: 1.5rem;
+    }
+
+    .progress-bar-fill {
+      height: 100%;
+      width: 25%;
+      background: linear-gradient(90deg, var(--accent-blue), #60a5fa);
+      border-radius: 999px;
+      transition: width 0.3s ease;
+    }
+
+    /* Buttons */
+    .btn {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      gap: 0.5rem;
+      font-weight: 600;
+      font-size: 0.95rem;
+      padding: 0.75rem 1.5rem;
+      border-radius: 12px;
+      text-decoration: none;
+      border: none;
+      cursor: pointer;
+      transition: all 0.2s ease;
+    }
+
+    .btn-primary {
+      background: var(--accent-blue);
+      color: #fff;
+      box-shadow: 0 4px 14px var(--accent-glow);
+    }
+
+    .btn-primary:hover {
+      background: var(--accent-blue-hover);
+      transform: translateY(-1px);
+    }
+
+    .btn-secondary {
+      background: rgba(255, 255, 255, 0.08);
+      color: var(--text-primary);
+      border: 1px solid var(--border-color);
+    }
+
+    .btn-secondary:hover { background: rgba(255, 255, 255, 0.12); }
+    .btn-large { width: 100%; padding: 0.95rem 1.5rem; font-size: 1.05rem; }
+
+    /* Host Card (Found State) */
+    .host-box {
+      background: rgba(15, 23, 42, 0.75);
+      border: 1px solid rgba(59, 130, 246, 0.3);
+      border-radius: 16px;
+      padding: 1.25rem;
+      margin-bottom: 1.5rem;
+      text-align: left;
+    }
+
+    .host-header {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      margin-bottom: 0.5rem;
+    }
+
+    .host-name {
+      font-size: 1.15rem;
+      font-weight: 700;
+      color: #fff;
+    }
+
+    .host-tag {
+      font-size: 0.75rem;
+      background: rgba(16, 185, 129, 0.2);
+      color: #34d399;
+      border: 1px solid rgba(16, 185, 129, 0.3);
+      padding: 0.2rem 0.5rem;
+      border-radius: 999px;
+      font-weight: 600;
+    }
+
+    .host-details-text {
+      font-size: 0.85rem;
+      color: var(--text-secondary);
+      font-family: monospace;
+    }
+
+    /* PIN Box */
+    .pin-box {
+      margin: 1.25rem 0;
+      text-align: left;
+    }
+
+    .pin-box label {
+      display: block;
+      font-size: 0.85rem;
+      font-weight: 500;
+      color: var(--text-secondary);
+      margin-bottom: 0.5rem;
+    }
+
+    .pin-input-group { display: flex; gap: 0.5rem; }
+
+    .pin-input-group input {
+      flex: 1;
+      background: rgba(15, 23, 42, 0.8);
+      border: 1px solid var(--border-color);
+      border-radius: 12px;
+      padding: 0.75rem 1rem;
+      color: #fff;
+      font-size: 1.25rem;
+      font-weight: 700;
+      letter-spacing: 0.25em;
+      text-align: center;
+      outline: none;
+    }
+
+    .pin-input-group input:focus { border-color: var(--border-focus); }
+
+    .error-text { color: var(--accent-red); font-size: 0.82rem; margin-top: 0.4rem; }
+
+    /* Collapsible Host Section */
+    .host-collapsible {
+      margin-top: 1.5rem;
+      border-top: 1px solid var(--border-color);
+      padding-top: 1.25rem;
+      text-align: left;
+    }
+
+    .host-collapsible summary {
+      font-size: 0.85rem;
+      color: var(--text-dim);
+      cursor: pointer;
+      font-weight: 500;
+      list-style: none;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+    }
+
+    .host-collapsible summary::-webkit-details-marker { display: none; }
+    .host-collapsible summary:hover { color: var(--text-secondary); }
+
+    .host-download-content {
+      margin-top: 1rem;
+      background: rgba(15, 23, 42, 0.6);
+      border: 1px solid var(--border-color);
+      border-radius: 14px;
+      padding: 1.25rem;
+    }
+
+    .host-download-content h4 {
+      font-size: 0.95rem;
+      color: var(--text-primary);
+      margin-bottom: 0.35rem;
+    }
+
+    .host-download-content p {
+      font-size: 0.82rem;
+      color: var(--text-secondary);
+      line-height: 1.4;
+      margin-bottom: 1rem;
+    }
+
+    .download-grid {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 0.5rem;
+    }
+
+    .btn-download-pill {
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      gap: 0.4rem;
+      background: rgba(255, 255, 255, 0.06);
+      border: 1px solid var(--border-color);
+      color: #fff;
+      padding: 0.65rem 0.75rem;
+      border-radius: 10px;
+      font-size: 0.82rem;
+      text-decoration: none;
+      font-weight: 500;
+      transition: all 0.2s;
+    }
+
+    .btn-download-pill:hover {
+      background: rgba(255, 255, 255, 0.12);
+      border-color: var(--accent-blue);
+    }
+
+    /* Help Tips */
+    .help-tips {
+      margin-top: 1.25rem;
+      display: flex;
+      flex-direction: column;
+      gap: 0.5rem;
+      text-align: left;
+    }
+
+    .tip-item {
+      display: flex;
+      align-items: flex-start;
+      gap: 0.5rem;
+      font-size: 0.82rem;
+      color: var(--text-secondary);
+      line-height: 1.4;
+    }
+
+    .footer {
+      text-align: center;
+      font-size: 0.75rem;
+      color: var(--text-dim);
+    }
+  </style>
 </head>
 <body>
   <div class="container">
@@ -17,98 +392,105 @@
         <span class="logo-text">FileTransfer<b>Fast</b></span>
       </div>
       <div class="status-badge" id="netStatus">
-        <span class="dot pulse"></span> Checking Wi-Fi...
+        <span class="dot pulse"></span> Checking Network...
       </div>
     </header>
 
     <main class="main-card">
-      <!-- STATE 1: Probing & Auto-Connecting -->
-      <section id="stateProbing" class="state-view">
-        <div class="spinner-wrapper">
-          <div class="spinner"></div>
+      <!-- STATE 1: Probing & Scanning -->
+      <section id="stateScanning" class="state-view">
+        <div class="icon-circle scan">
+          <span>📡</span>
         </div>
-        <h1 class="title">Looking for Local Transfer Engine...</h1>
-        <p class="subtitle" id="probingDesc">Connecting to devices on your local Wi-Fi or Hotspot...</p>
+        <h1 class="title">Scanning for Host Device...</h1>
+        <p class="subtitle" id="scanningDesc">Looking for active FileTransfer hosts on your local Wi-Fi or Hotspot...</p>
         <div class="progress-bar-container">
-          <div class="progress-bar-fill" id="probingProgress"></div>
+          <div class="progress-bar-fill" id="scanningProgress"></div>
         </div>
       </section>
 
-      <!-- STATE 2: Connected / Redirecting -->
-      <section id="stateRedirecting" class="state-view hidden">
+      <!-- STATE 2: Host Found (Zero-Install Join Experience) -->
+      <section id="stateHostFound" class="state-view hidden">
         <div class="icon-circle success">
-          <span>🚀</span>
-        </div>
-        <h1 class="title">Connected to Host PC!</h1>
-        <p class="subtitle">Opening local high-speed file transfer...</p>
-        <div class="redirect-action">
-          <a id="directLinkBtn" href="#" class="btn btn-primary btn-large">
-            Open File Transfer Now &rarr;
-          </a>
-        </div>
-        <p class="dim-text">If not redirected automatically in 2 seconds, click the button above.</p>
-      </section>
-
-      <!-- STATE 3: Local App Not Detected / Fallback -->
-      <section id="stateNotFound" class="state-view hidden">
-        <div class="icon-circle warning">
           <span>📱</span>
         </div>
-        <h1 class="title">Local App Not Detected</h1>
-        <p class="subtitle">
-          We could not reach the local file transfer engine on your network.
-        </p>
+        <h1 class="title">Host Device Found!</h1>
+        <p class="subtitle">Connected to your Wi-Fi & ready to transfer files.</p>
 
-        <div class="action-card" id="platformCard">
-          <div class="platform-header">
-            <span class="platform-badge" id="detectedOsBadge">📱 Android</span>
-            <h3 id="platformTitle">Need the Mobile App?</h3>
+        <div class="host-box">
+          <div class="host-header">
+            <span class="host-name" id="foundHostName">Host Device</span>
+            <span class="host-tag">ONLINE</span>
           </div>
-          <p id="platformDesc">Install the fast local file transfer APK to send and receive files at maximum Wi-Fi speed.</p>
-          
-          <div id="primaryActionContainer">
-            <a href="/api/download-apk" class="btn btn-primary btn-large" id="downloadApkBtn">
-              <span class="btn-icon">📥</span> <span id="downloadBtnText">Download Android APK</span>
-            </a>
-          </div>
-
-          <div class="os-selector">
-            <button class="os-pill active" data-os="android">Android</button>
-            <button class="os-pill" data-os="ios">iPhone / iPad</button>
-            <button class="os-pill" data-os="windows">Windows</button>
-            <button class="os-pill" data-os="mac">Mac / Linux</button>
-          </div>
+          <div class="host-details-text" id="foundHostIp">192.168.1.15:8001</div>
         </div>
 
-        <div class="manual-section">
-          <div class="divider"><span>OR CONNECT MANUALLY</span></div>
-          
-          <div class="pin-box">
-            <label for="pinInput">Enter 4-Digit PIN from your PC:</label>
-            <div class="pin-input-group">
-              <input type="text" id="pinInput" maxlength="4" placeholder="e.g. 4821" inputmode="numeric">
-              <button id="pinSubmitBtn" class="btn btn-secondary">Connect</button>
-            </div>
-            <p id="pinError" class="error-text hidden"></p>
-          </div>
+        <div class="action-btn-wrapper">
+          <a id="connectDirectBtn" href="#" class="btn btn-primary btn-large">
+            👉 Connect & Transfer Files (Zero Install) &rarr;
+          </a>
+        </div>
+        <p class="subtitle" style="margin-top: 1rem; font-size: 0.82rem; margin-bottom: 0;">
+          No app download required. Transfers directly over your high-speed local Wi-Fi.
+        </p>
+      </section>
 
-          <div id="knownIpsSection" class="known-ips hidden">
-            <h4>Detected Host IP Addresses:</h4>
-            <ul id="ipsList" class="ips-list"></ul>
-          </div>
+      <!-- STATE 3: No Host Found Yet (Enter PIN or Host Yourself) -->
+      <section id="stateNoHost" class="state-view hidden">
+        <div class="icon-circle scan">
+          <span>⚡</span>
+        </div>
+        <h1 class="title">Join & Transfer Files</h1>
+        <p class="subtitle">
+          <b>No app needed on this device!</b> Connect to the host on your Wi-Fi to start sending or receiving.
+        </p>
 
-          <div class="help-tips">
-            <div class="tip-item">
-              <span class="tip-icon">💡</span>
-              <span>Make sure this device is connected to the <b>same Wi-Fi</b> or <b>Mobile Hotspot</b> as your PC.</span>
-            </div>
-            <div class="tip-item">
-              <span class="tip-icon">⚡</span>
-              <span>Make sure the local app is running on your PC.</span>
-            </div>
+        <div class="pin-box">
+          <label for="pinInput">Enter 4-Digit PIN shown on the Host screen:</label>
+          <div class="pin-input-group">
+            <input type="text" id="pinInput" maxlength="4" placeholder="e.g. 4821" inputmode="numeric">
+            <button id="pinSubmitBtn" class="btn btn-primary">Connect &rarr;</button>
+          </div>
+          <p id="pinError" class="error-text hidden"></p>
+        </div>
+
+        <div class="help-tips">
+          <div class="tip-item">
+            <span>💡</span>
+            <span>Make sure both devices are on the <b>same Wi-Fi</b> or <b>Mobile Hotspot</b>.</span>
+          </div>
+          <div class="tip-item">
+            <span>⚡</span>
+            <span>Ensure the host device has FileTransfer started.</span>
           </div>
         </div>
       </section>
+
+      <!-- ARE YOU THE HOST? (Collapsible section) -->
+      <details class="host-collapsible">
+        <summary>
+          <span>Want to host files from this device?</span>
+          <span>▾</span>
+        </summary>
+        <div class="host-download-content">
+          <h4>Host Engine Downloads</h4>
+          <p>Only the host needs the engine to serve local Wi-Fi files. Second devices connect through the browser.</p>
+          <div class="download-grid">
+            <a href="/downloads/file-transfer-windows.zip" download="file-transfer-windows.zip" class="btn-download-pill">
+              <span>💻</span> Windows App (.zip)
+            </a>
+            <a href="/downloads/file-transfer.apk" download="file-transfer.apk" class="btn-download-pill">
+              <span>📱</span> Android App (.apk)
+            </a>
+            <a href="/downloads/file-transfer-mac-linux.zip" download="file-transfer-mac-linux.zip" class="btn-download-pill">
+              <span>🖥️</span> Mac / Linux (.zip)
+            </a>
+            <a href="/downloads/file-transfer-web.zip" download="file-transfer-web.zip" class="btn-download-pill">
+              <span>🌐</span> Web Bundle (.zip)
+            </a>
+          </div>
+        </div>
+      </details>
     </main>
 
     <footer class="footer">
