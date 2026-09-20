@@ -1,0 +1,11 @@
+{
+  "name": "file-transfer-live-wrapper",
+  "version": "1.0.0",
+  "description": "Cloud discovery wrapper and APK download lobby for local file transfer",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js",
+    "build": "echo Live site ready"
+  },
+  "dependencies": {}
+}

@@ -1,0 +1,121 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Fast File Transfer — Connecting</title>
+  <link rel="stylesheet" href="style.css">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+</head>
+<body>
+  <div class="container">
+    <header class="header">
+      <div class="logo">
+        <span class="logo-icon">⚡</span>
+        <span class="logo-text">FileTransfer<b>Fast</b></span>
+      </div>
+      <div class="status-badge" id="netStatus">
+        <span class="dot pulse"></span> Checking Wi-Fi...
+      </div>
+    </header>
+
+    <main class="main-card">
+      <!-- STATE 1: Probing & Auto-Connecting -->
+      <section id="stateProbing" class="state-view">
+        <div class="spinner-wrapper">
+          <div class="spinner"></div>
+        </div>
+        <h1 class="title">Looking for Local Transfer Engine...</h1>
+        <p class="subtitle" id="probingDesc">Connecting to devices on your local Wi-Fi or Hotspot...</p>
+        <div class="progress-bar-container">
+          <div class="progress-bar-fill" id="probingProgress"></div>
+        </div>
+      </section>
+
+      <!-- STATE 2: Connected / Redirecting -->
+      <section id="stateRedirecting" class="state-view hidden">
+        <div class="icon-circle success">
+          <span>🚀</span>
+        </div>
+        <h1 class="title">Connected to Host PC!</h1>
+        <p class="subtitle">Opening local high-speed file transfer...</p>
+        <div class="redirect-action">
+          <a id="directLinkBtn" href="#" class="btn btn-primary btn-large">
+            Open File Transfer Now &rarr;
+          </a>
+        </div>
+        <p class="dim-text">If not redirected automatically in 2 seconds, click the button above.</p>
+      </section>
+
+      <!-- STATE 3: Local App Not Detected / Fallback -->
+      <section id="stateNotFound" class="state-view hidden">
+        <div class="icon-circle warning">
+          <span>📱</span>
+        </div>
+        <h1 class="title">Local App Not Detected</h1>
+        <p class="subtitle">
+          We could not reach the local file transfer engine on your network.
+        </p>
+
+        <div class="action-card" id="platformCard">
+          <div class="platform-header">
+            <span class="platform-badge" id="detectedOsBadge">📱 Android</span>
+            <h3 id="platformTitle">Need the Mobile App?</h3>
+          </div>
+          <p id="platformDesc">Install the fast local file transfer APK to send and receive files at maximum Wi-Fi speed.</p>
+          
+          <div id="primaryActionContainer">
+            <a href="/api/download-apk" class="btn btn-primary btn-large" id="downloadApkBtn">
+              <span class="btn-icon">📥</span> <span id="downloadBtnText">Download Android APK</span>
+            </a>
+          </div>
+
+          <div class="os-selector">
+            <button class="os-pill active" data-os="android">Android</button>
+            <button class="os-pill" data-os="ios">iPhone / iPad</button>
+            <button class="os-pill" data-os="windows">Windows</button>
+            <button class="os-pill" data-os="mac">Mac / Linux</button>
+          </div>
+        </div>
+
+        <div class="manual-section">
+          <div class="divider"><span>OR CONNECT MANUALLY</span></div>
+          
+          <div class="pin-box">
+            <label for="pinInput">Enter 4-Digit PIN from your PC:</label>
+            <div class="pin-input-group">
+              <input type="text" id="pinInput" maxlength="4" placeholder="e.g. 4821" inputmode="numeric">
+              <button id="pinSubmitBtn" class="btn btn-secondary">Connect</button>
+            </div>
+            <p id="pinError" class="error-text hidden"></p>
+          </div>
+
+          <div id="knownIpsSection" class="known-ips hidden">
+            <h4>Detected Host IP Addresses:</h4>
+            <ul id="ipsList" class="ips-list"></ul>
+          </div>
+
+          <div class="help-tips">
+            <div class="tip-item">
+              <span class="tip-icon">💡</span>
+              <span>Make sure this device is connected to the <b>same Wi-Fi</b> or <b>Mobile Hotspot</b> as your PC.</span>
+            </div>
+            <div class="tip-item">
+              <span class="tip-icon">⚡</span>
+              <span>Make sure the local app is running on your PC.</span>
+            </div>
+          </div>
+        </div>
+      </section>
+    </main>
+
+    <footer class="footer">
+      <span>Zero Cloud Storage &bull; 100% Direct Local Wi-Fi Speed</span>
+    </footer>
+  </div>
+
+  <script src="app.js"></script>
+</body>
+</html>
