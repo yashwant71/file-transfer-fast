@@ -1697,6 +1697,8 @@ validateBrowserJS();
       }
       console.log('🌐 VERCEL LINK FOR OTHER DEVICES (Phones / Mac):');
       console.log('   https://live-site-pi.vercel.app/?host=' + HOST_IP + '&port=' + HTTP_PORT + '&name=Host+PC');
+      console.log('🖥️ VERCEL LINK FOR THIS HOST PC:');
+      console.log('   https://live-site-pi.vercel.app/?host=' + HOST_IP + '&port=' + HTTP_PORT + '&name=Host+PC&role=host');
       console.log('='.repeat(55));
       addLog('Secure server started (HTTPS:' + HTTPS_PORT + ')', 'info');
 

@@ -237,6 +237,53 @@
       border-radius: 6px;
     }
 
+    /* Role Selector Pills */
+    .role-selector {
+      width: 100%;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      gap: 0.35rem;
+      margin: 0.2rem 0 0.5rem;
+    }
+    .role-label {
+      font-size: 0.74rem;
+      color: var(--text-secondary);
+      font-weight: 600;
+      letter-spacing: 0.04em;
+    }
+    .role-pills {
+      display: flex;
+      background: rgba(0, 0, 0, 0.4);
+      border: 1px solid var(--border-color);
+      border-radius: 9999px;
+      padding: 0.2rem;
+      gap: 0.25rem;
+      width: 100%;
+      max-width: 320px;
+    }
+    .role-pill {
+      flex: 1;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      gap: 0.35rem;
+      padding: 0.45rem 0.6rem;
+      font-size: 0.8rem;
+      font-weight: 600;
+      color: var(--text-secondary);
+      background: transparent;
+      border: none;
+      border-radius: 9999px;
+      cursor: pointer;
+      transition: all 0.2s ease;
+    }
+    .role-pill.active {
+      background: var(--accent-blue);
+      color: #fff;
+      box-shadow: 0 2px 8px rgba(37, 99, 235, 0.4);
+    }
+
     /* Action Buttons */
     .btn {
       width: 100%;
@@ -457,13 +504,26 @@
           </div>
         </section>
 
-        <!-- SUB-STATE B: Host Found! (Single Click Connect) -->
+        <!-- SUB-STATE B: Host Found! (Smart Device Role Detection) -->
         <section id="stateHostFound" class="state-view hidden">
           <div class="icon-circle success">
             <span id="hostIcon">💻</span>
           </div>
           <h1 class="title" id="hostFoundTitle">Host Device Found!</h1>
           <p class="subtitle" id="hostFoundSubtitle">Connected on your local network & ready to transfer.</p>
+
+          <!-- Device Role Selector (Host PC vs Mobile Phone) -->
+          <div class="role-selector" id="roleSelector">
+            <span class="role-label">Which device is this?</span>
+            <div class="role-pills">
+              <button type="button" class="role-pill active" id="roleHostBtn">
+                <span>💻</span> Host PC
+              </button>
+              <button type="button" class="role-pill" id="roleClientBtn">
+                <span>📱</span> Phone / Client
+              </button>
+            </div>
+          </div>
 
           <div class="host-card">
             <div class="host-header-line">
@@ -476,8 +536,8 @@
           <a id="connectDirectBtn" href="#" class="btn btn-primary">
             ⚡ Connect to Host & Transfer Files &rarr;
           </a>
-          <a id="selfHostBtn" href="http://localhost:8001/devices-ui" class="btn btn-secondary hidden" style="margin-top: 0.4rem;">
-            📂 Open Local Host Dashboard &rarr;
+          <a id="selfHostBtn" href="http://localhost:8001/devices-ui" class="btn btn-primary hidden">
+            📂 Open Host Dashboard & Transfer Files &rarr;
           </a>
           <p class="subtitle" id="hostFooterNote" style="font-size: 0.78rem; margin-top: 0.5rem;">
             Zero installation required. Transfers directly over Wi-Fi at max speed.

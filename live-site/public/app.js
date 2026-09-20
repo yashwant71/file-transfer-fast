@@ -23,8 +23,13 @@
   const manualIpInput = document.getElementById('manualIpInput');
   const manualConnectBtn = document.getElementById('manualConnectBtn');
 
+  const roleSelector = document.getElementById('roleSelector');
+  const roleHostBtn = document.getElementById('roleHostBtn');
+  const roleClientBtn = document.getElementById('roleClientBtn');
+
   let publicIp = null;
   let networkTopic = null;
+  let currentHostData = null;
 
   // Tab switching
   tabFind.addEventListener('click', () => {
@@ -75,38 +80,78 @@
     return null;
   }
 
-  function displayHostFound(hostIp, port, name, isSelf) {
+  // Role switching
+  if (roleHostBtn && roleClientBtn) {
+    roleHostBtn.addEventListener('click', () => applyDeviceRole('host'));
+    roleClientBtn.addEventListener('click', () => applyDeviceRole('client'));
+  }
+
+  function applyDeviceRole(role) {
+    if (!currentHostData) return;
+    try { localStorage.setItem('ftf_role', role); } catch(e) {}
+
+    if (role === 'host') {
+      if (roleHostBtn) roleHostBtn.classList.add('active');
+      if (roleClientBtn) roleClientBtn.classList.remove('active');
+
+      hostFoundTitle.textContent = '🟢 You are Hosting!';
+      hostFoundSubtitle.textContent = 'Your transfer engine is active and running on this PC.';
+      foundHostName.textContent = 'This Device (Host PC)';
+      foundHostBadge.textContent = 'HOSTING ACTIVE';
+      foundHostBadge.style.background = 'rgba(16, 185, 129, 0.2)';
+      foundHostBadge.style.color = '#10b981';
+      foundHostIp.textContent = currentHostData.hostIp + ':' + currentHostData.port + ' (Local Engine)';
+
+      selfHostBtn.classList.remove('hidden');
+      selfHostBtn.href = 'http://localhost:' + currentHostData.port + '/devices-ui';
+      selfHostBtn.textContent = '📂 Open Host Dashboard & Transfer Files →';
+      connectDirectBtn.classList.add('hidden');
+
+      hostFooterNote.innerHTML = '📱 <b>To connect your Phone:</b> Open <code style="background:rgba(255,255,255,0.1);padding:2px 6px;border-radius:4px">live-site-pi.vercel.app</code> on your phone — it connects automatically!';
+    } else {
+      if (roleClientBtn) roleClientBtn.classList.add('active');
+      if (roleHostBtn) roleHostBtn.classList.remove('active');
+
+      hostFoundTitle.textContent = 'Host Device Found!';
+      hostFoundSubtitle.textContent = 'Connected on your local Wi-Fi & ready to transfer.';
+      foundHostName.textContent = currentHostData.name || 'Host PC';
+      foundHostBadge.textContent = 'ONLINE';
+      foundHostBadge.style.background = 'rgba(59, 130, 246, 0.2)';
+      foundHostBadge.style.color = '#60a5fa';
+      foundHostIp.textContent = currentHostData.hostIp + ':' + currentHostData.port;
+
+      connectDirectBtn.classList.remove('hidden');
+      connectDirectBtn.href = 'http://' + currentHostData.hostIp + ':' + currentHostData.port + '/devices-ui';
+      connectDirectBtn.textContent = '⚡ Connect to Host & Transfer Files →';
+      selfHostBtn.classList.add('hidden');
+
+      hostFooterNote.textContent = 'Transfers directly over your local Wi-Fi at max speed. Zero installation required.';
+    }
+  }
+
+  function displayHostFound(hostIp, port, name) {
+    currentHostData = { hostIp, port, name };
     showFindState('found');
     netStatus.innerHTML = '<span class="dot" style="background:#10b981"></span> Host Ready';
 
-    if (isSelf) {
-      hostFoundTitle.textContent = '🟢 You are Hosting!';
-      hostFoundSubtitle.textContent = 'Your transfer engine is active on this device.';
-      foundHostName.textContent = 'This Device (Host)';
-      foundHostBadge.textContent = 'HOSTING';
-      foundHostBadge.style.background = 'rgba(59, 130, 246, 0.2)';
-      foundHostBadge.style.color = '#60a5fa';
-      foundHostIp.textContent = hostIp + ':' + port;
+    // Smart role detection
+    const isMobileDevice = /Android|iPhone|iPad|iPod|Mobile/i.test(navigator.userAgent);
+    let storedRole = null;
+    try { storedRole = localStorage.getItem('ftf_role'); } catch(e) {}
 
-      connectDirectBtn.textContent = '📂 Open Local Transfer UI →';
-      connectDirectBtn.href = 'http://localhost:' + port + '/devices-ui';
-      selfHostBtn.classList.add('hidden');
-      hostFooterNote.textContent = 'Other phones or PCs on this Wi-Fi can open this website to connect to you!';
+    let initialRole = 'client';
+    if (paramRole === 'host' || window.location.hostname === 'localhost' || window.location.hostname === '127.0.0.1') {
+      initialRole = 'host';
+    } else if (storedRole === 'host' || storedRole === 'client') {
+      initialRole = storedRole;
+    } else if (isMobileDevice) {
+      initialRole = 'client'; // Phone visiting site is a client
     } else {
-      hostFoundTitle.textContent = 'Host Device Found!';
-      hostFoundSubtitle.textContent = 'Connected on your Wi-Fi & ready to transfer.';
-      foundHostName.textContent = name || 'Host PC';
-      foundHostBadge.textContent = 'ONLINE';
-      foundHostBadge.style.background = 'rgba(16, 185, 129, 0.2)';
-      foundHostBadge.style.color = '#10b981';
-      foundHostIp.textContent = hostIp + ':' + port;
-
-      connectDirectBtn.textContent = '⚡ Connect to Host & Transfer Files →';
-      connectDirectBtn.href = 'http://' + hostIp + ':' + port + '/devices-ui';
-      selfHostBtn.classList.remove('hidden');
-      selfHostBtn.href = 'http://localhost:' + port + '/devices-ui';
-      hostFooterNote.textContent = 'Transfers directly over your local Wi-Fi at max speed. Zero installation required.';
+      // Desktop PC on the same Wi-Fi as host engine defaults to host
+      initialRole = 'host';
     }
+
+    applyDeviceRole(initialRole);
   }
 
   // Check URL parameters first (e.g. ?host=10.14.0.243&port=8001&name=Host+PC)
@@ -117,8 +162,7 @@
   const paramRole = urlParams.get('role');
 
   if (paramHost) {
-    const isSelf = paramRole === 'host' || window.location.hostname === 'localhost' || window.location.hostname === '127.0.0.1';
-    displayHostFound(paramHost, paramPort, paramName, isSelf);
+    displayHostFound(paramHost, paramPort, paramName);
     return;
   }
 
@@ -144,8 +188,7 @@
               const age = now - (data.timestamp || 0);
 
               if (data.active === true && data.hostIp && age >= 0 && age < HEARTBEAT_WINDOW_MS) {
-                const isSelf = window.location.hostname === 'localhost' || window.location.hostname === '127.0.0.1' || paramRole === 'host';
-                displayHostFound(data.hostIp, data.httpPort || 8001, data.deviceName || 'Host PC', isSelf);
+                displayHostFound(data.hostIp, data.httpPort || 8001, data.deviceName || 'Host PC');
                 return;
               }
             }
