@@ -85,14 +85,16 @@
   }
 
   function getNetworkTopics(ip) {
-    const topics = ['ftf-hotspot-active'];
-    if (!ip) return topics;
-    const clean = ip.replace(/[^a-zA-Z0-9]/g, '_');
-    topics.push('ftf-net-' + clean);
-    const parts = ip.split('.');
-    if (parts.length === 4) {
-      topics.push('ftf-sub-' + parts[0] + '_' + parts[1] + '_' + parts[2]);
+    const topics = [];
+    if (ip) {
+      const clean = ip.replace(/[^a-zA-Z0-9]/g, '_');
+      topics.push('ftf-net-' + clean);
+      const parts = ip.split('.');
+      if (parts.length === 4) {
+        topics.push('ftf-sub-' + parts[0] + '_' + parts[1] + '_' + parts[2]);
+      }
     }
+    topics.push('ftf-hotspot-active');
     return topics;
   }
 
@@ -200,35 +202,46 @@
         }
       } catch(e) {}
 
-      // 3. Try ntfy.sh Fast Polling
+      // 3. Multi-Relay Fast Polling (ntfy.envs.net + ntfy.sh)
       try {
         const ip = await resolvePublicIp();
         const topics = getNetworkTopics(ip);
-        for (const topic of topics) {
+        const CLOUD_RELAYS = ['https://ntfy.envs.net', 'https://ntfy.sh'];
+
+        async function pollRelayTopic(relay, topic) {
           try {
-            const ntfyRes = await fetch('https://ntfy.sh/' + topic + '/json?poll=1', {
+            const res = await fetch(`${relay}/${topic}/json?poll=1`, {
               cache: 'no-store',
-              signal: AbortSignal.timeout(1800)
+              signal: AbortSignal.timeout(2500)
             });
-            if (ntfyRes.ok) {
-              const text = await ntfyRes.text();
-              const lines = text.trim().split('\n').filter(Boolean);
-              for (let i = lines.length - 1; i >= 0; i--) {
-                try {
-                  const item = JSON.parse(lines[i]);
-                  if (item.event === 'message' && item.message) {
-                    const msgData = JSON.parse(item.message);
-                    const age = Date.now() - (msgData.timestamp || 0);
-                    if (msgData.active === true && msgData.hostIp && age >= 0 && age < 25000) {
-                      displayHostFound(msgData.hostIp, msgData.httpPort || 8001, msgData.deviceName || 'Host PC', msgData.allIps);
-                      isChecking = false;
-                      return;
-                    }
+            if (!res.ok) return null;
+            const text = await res.text();
+            const lines = text.trim().split('\n').filter(Boolean);
+            for (let i = lines.length - 1; i >= 0; i--) {
+              try {
+                const item = JSON.parse(lines[i]);
+                if (item.event === 'message' && item.message) {
+                  const msgData = JSON.parse(item.message);
+                  const age = Date.now() - (msgData.timestamp || 0);
+                  if (msgData.active === true && msgData.hostIp && age >= 0 && age < 35000) {
+                    return msgData;
                   }
-                } catch(e) {}
-              }
+                }
+              } catch(e) {}
             }
           } catch(e) {}
+          return null;
+        }
+
+        for (const topic of topics) {
+          for (const relay of CLOUD_RELAYS) {
+            const host = await pollRelayTopic(relay, topic);
+            if (host) {
+              displayHostFound(host.hostIp, host.httpPort || host.port || 8001, host.deviceName || 'Host PC', host.allIps);
+              isChecking = false;
+              return;
+            }
+          }
         }
       } catch(e) {}
 
