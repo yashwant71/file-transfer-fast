@@ -2,7 +2,8 @@
   "version": 2,
   "cleanUrls": true,
   "rewrites": [
-    { "source": "/api/(.*)", "destination": "/live-site/api" },
+    { "source": "/api/active-host", "destination": "/live-site/api/active-host.js" },
+    { "source": "/api/announce", "destination": "/live-site/api/announce.js" },
     { "source": "/(.*)", "destination": "/live-site/public/$1" }
   ]
 }

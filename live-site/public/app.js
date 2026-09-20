@@ -1,101 +1,152 @@
-// live-site/public/app.js — Instant Host Discovery & 0-Install Connection
-
+// live-site/public/app.js — Instant Host Discovery & 1-Click Connect
 (function() {
+  // Elements
+  const tabFind = document.getElementById('tabFind');
+  const tabHost = document.getElementById('tabHost');
+  const viewFind = document.getElementById('viewFind');
+  const viewHost = document.getElementById('viewHost');
+
   const stateScanning = document.getElementById('stateScanning');
   const stateHostFound = document.getElementById('stateHostFound');
   const stateNoHost = document.getElementById('stateNoHost');
   const netStatus = document.getElementById('netStatus');
-  const scanningDesc = document.getElementById('scanningDesc');
-  const scanningProgress = document.getElementById('scanningProgress');
 
   const foundHostName = document.getElementById('foundHostName');
   const foundHostIp = document.getElementById('foundHostIp');
   const connectDirectBtn = document.getElementById('connectDirectBtn');
+  const rescanBtn = document.getElementById('rescanBtn');
 
-  const pinInput = document.getElementById('pinInput');
-  const pinSubmitBtn = document.getElementById('pinSubmitBtn');
-  const pinError = document.getElementById('pinError');
+  const manualIpInput = document.getElementById('manualIpInput');
+  const manualConnectBtn = document.getElementById('manualConnectBtn');
 
-  function showState(state) {
+  // Cloud Relay URL (Shared across all networks)
+  const RELAY_URL = 'https://api.restful-api.dev/objects/ff808181a09d98f701a0bd4a36264d98';
+
+  // Tab switching
+  tabFind.addEventListener('click', () => {
+    tabFind.classList.add('active');
+    tabHost.classList.remove('active');
+    viewFind.classList.remove('hidden');
+    viewHost.classList.add('hidden');
+  });
+
+  tabHost.addEventListener('click', () => {
+    tabHost.classList.add('active');
+    tabFind.classList.remove('active');
+    viewHost.classList.remove('hidden');
+    viewFind.classList.add('hidden');
+  });
+
+  function showFindState(state) {
     stateScanning.classList.add('hidden');
     stateHostFound.classList.add('hidden');
     stateNoHost.classList.add('hidden');
 
     if (state === 'scanning') stateScanning.classList.remove('hidden');
-    else if (state === 'host_found') stateHostFound.classList.remove('hidden');
+    else if (state === 'found') stateHostFound.classList.remove('hidden');
     else if (state === 'no_host') stateNoHost.classList.remove('hidden');
   }
 
   function displayHostFound(hostIp, port, name) {
-    showState('host_found');
+    showFindState('found');
     netStatus.innerHTML = '<span class="dot" style="background:#10b981"></span> Host Ready';
     foundHostName.textContent = name || 'Host Device';
     foundHostIp.textContent = hostIp + ':' + port;
     connectDirectBtn.href = 'http://' + hostIp + ':' + port + '/devices-ui';
   }
 
-  // Check URL parameters first (e.g. ?host=192.168.1.15&port=8001&name=Pixel+7 or ?pin=4821)
+  // 1. Check URL parameters (?host=10.14.0.243&port=8001&name=Host+PC)
   const urlParams = new URLSearchParams(window.location.search);
   const paramHost = urlParams.get('host');
   const paramPort = urlParams.get('port') || '8001';
   const paramName = urlParams.get('name') || 'Host Device';
-  const paramPin = urlParams.get('pin');
 
   if (paramHost) {
     displayHostFound(paramHost, paramPort, paramName);
     return;
   }
 
-  // Probe API for active hosts
-  async function searchForHost(pinToTry) {
-    showState('scanning');
-    scanningProgress.style.width = '40%';
-    scanningDesc.textContent = pinToTry ? 'Verifying PIN...' : 'Looking for active host on your Wi-Fi...';
+  // 2. Discover Active Host
+  let isScanning = false;
 
-    const apiUrl = '/api/active-host' + (pinToTry ? '?pin=' + encodeURIComponent(pinToTry) : '');
+  async function discoverHost() {
+    if (isScanning) return;
+    isScanning = true;
 
+    // Check Cloud Relay
     try {
-      const resp = await fetch(apiUrl);
-      const data = await resp.json();
-
-      scanningProgress.style.width = '100%';
-
-      if (data.found && data.hostIp) {
-        displayHostFound(data.hostIp, data.httpPort || 8001, data.deviceName);
-      } else {
-        showState('no_host');
-        netStatus.innerHTML = '<span class="dot" style="background:#f59e0b"></span> Waiting for Host';
-        if (pinToTry) {
-          pinError.textContent = 'No host found with PIN ' + pinToTry + '. Is the host running?';
-          pinError.classList.remove('hidden');
+      const resp = await fetch(RELAY_URL, { cache: 'no-store' });
+      if (resp.ok) {
+        const json = await resp.json();
+        const data = json.data;
+        if (data && data.hostIp) {
+          // Check if announcement is recent (within last 30 minutes)
+          const now = Date.now();
+          const age = now - (data.timestamp || 0);
+          if (age < 30 * 60 * 1000) {
+            displayHostFound(data.hostIp, data.httpPort || 8001, data.deviceName || 'Host PC');
+            isScanning = false;
+            return;
+          }
         }
       }
-    } catch (err) {
-      showState('no_host');
-      netStatus.innerHTML = '<span class="dot" style="background:#ef4444"></span> Offline';
-      if (pinToTry) {
-        pinError.textContent = 'Network error connecting to lobby.';
-        pinError.classList.remove('hidden');
-      }
+    } catch (e) {
+      // Cloud relay check failed, try Vercel local API next
     }
+
+    // Check Vercel local API as secondary
+    try {
+      const apiResp = await fetch('/api/active-host', { cache: 'no-store' });
+      if (apiResp.ok) {
+        const apiData = await apiResp.json();
+        if (apiData.found && apiData.hostIp) {
+          displayHostFound(apiData.hostIp, apiData.httpPort || 8001, apiData.deviceName || 'Host PC');
+          isScanning = false;
+          return;
+        }
+      }
+    } catch (e) {}
+
+    // If still in scanning state after check
+    if (stateHostFound.classList.contains('hidden')) {
+      showFindState('no_host');
+      netStatus.innerHTML = '<span class="dot" style="background:#f59e0b"></span> Waiting for Host';
+    }
+
+    isScanning = false;
   }
 
-  // PIN submission
-  pinSubmitBtn.addEventListener('click', () => {
-    const val = pinInput.value.trim();
-    if (!val || val.length !== 4) {
-      pinError.textContent = 'Please enter a valid 4-digit PIN';
-      pinError.classList.remove('hidden');
-      return;
+  // Manual IP connect
+  manualConnectBtn.addEventListener('click', () => {
+    let val = manualIpInput.value.trim();
+    if (!val) return;
+    if (!val.startsWith('http://') && !val.startsWith('https://')) {
+      val = 'http://' + val;
     }
-    pinError.classList.add('hidden');
-    searchForHost(val);
+    if (!val.includes('/devices-ui')) {
+      val = val.replace(/\/$/, '') + '/devices-ui';
+    }
+    window.location.href = val;
   });
 
-  pinInput.addEventListener('keydown', (e) => {
-    if (e.key === 'Enter') pinSubmitBtn.click();
+  manualIpInput.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter') manualConnectBtn.click();
   });
 
-  // Start search
-  searchForHost(paramPin);
+  rescanBtn.addEventListener('click', () => {
+    showFindState('scanning');
+    netStatus.innerHTML = '<span class="dot pulse"></span> Searching...';
+    discoverHost();
+  });
+
+  // Initial discovery
+  showFindState('scanning');
+  discoverHost();
+
+  // Auto poll every 6 seconds if host not yet connected
+  setInterval(() => {
+    if (stateHostFound.classList.contains('hidden')) {
+      discoverHost();
+    }
+  }, 6000);
 })();

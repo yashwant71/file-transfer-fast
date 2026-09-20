@@ -1558,36 +1558,43 @@ validateBrowserJS();
 
   // Live Wrapper Announcement Hook (Dynamic Cloud Pairing)
   async function announceToLiveWrapper() {
-    if (!LIVE_WRAPPER_URL) return;
+    const payload = {
+      hostIp: HOST_IP,
+      allIps: getAllLocalIPs(),
+      httpPort: HTTP_PORT,
+      httpsPort: HTTPS_PORT,
+      deviceName: 'Host PC',
+      timestamp: Date.now()
+    };
+
+    // 1. Publish to Cloud Relay for instant discovery
     try {
-      const payload = {
-        hostIp: HOST_IP,
-        allIps: getAllLocalIPs(),
-        httpPort: HTTP_PORT,
-        httpsPort: HTTPS_PORT,
-        deviceName: 'Host PC',
-        pin: activePin
-      };
-      const resp = await fetch(`${LIVE_WRAPPER_URL.replace(/\/$/, '')}/api/announce`, {
-        method: 'POST',
+      await fetch('https://api.restful-api.dev/objects/ff808181a09d98f701a0bd4a36264d98', {
+        method: 'PUT',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(payload)
+        body: JSON.stringify({
+          name: 'file-transfer-active-host',
+          data: payload
+        })
       });
-      if (resp.ok) {
-        const data = await resp.json();
-        if (data.pin) {
-          activePin = data.pin;
-          console.log(`[LIVE-WRAPPER] Announced to ${LIVE_WRAPPER_URL} — Pairing PIN: ${activePin}`);
-        }
-      }
-    } catch (err) {
-      // Offline or live site unreachable, no disruption to local transfer
+      console.log(`[CLOUD-LOBBY] Host broadcast active (${HOST_IP}:${HTTP_PORT})`);
+    } catch (e) {
+      console.warn('[CLOUD-LOBBY] Relay notice:', e.message);
+    }
+
+    // 2. Publish to Vercel endpoint
+    if (LIVE_WRAPPER_URL) {
+      try {
+        await fetch(`${LIVE_WRAPPER_URL.replace(/\/$/, '')}/api/announce`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(payload)
+        });
+      } catch (err) {}
     }
   }
 
-  if (LIVE_WRAPPER_URL) {
-    announceToLiveWrapper();
-    setInterval(announceToLiveWrapper, 30 * 1000);
-  }
+  announceToLiveWrapper();
+  setInterval(announceToLiveWrapper, 15 * 1000);
 })();
 
