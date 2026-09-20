@@ -3,6 +3,7 @@ using System.Diagnostics;
 using System.Drawing;
 using System.IO;
 using System.Reflection;
+using System.Runtime.InteropServices;
 using System.Threading;
 using System.Windows.Forms;
 
@@ -13,6 +14,61 @@ namespace FileTransferFast
         public static Process serverProcess = null;
         public static MainWindow activeWindow = null;
         public static string logFilePath = "";
+        private static IntPtr jobHandle = IntPtr.Zero;
+        private static bool cleanupDone = false;
+        private static readonly object cleanupLock = new object();
+
+        // --- Job Object P/Invoke (kill child when parent dies) ---
+        [DllImport("kernel32.dll", CharSet = CharSet.Unicode)]
+        private static extern IntPtr CreateJobObject(IntPtr attrs, string name);
+
+        [DllImport("kernel32.dll")]
+        private static extern bool SetInformationJobObject(IntPtr job, int infoType, ref JOBOBJECT_EXTENDED_LIMIT_INFORMATION info, int len);
+
+        [DllImport("kernel32.dll")]
+        private static extern bool AssignProcessToJobObject(IntPtr job, IntPtr process);
+
+        [DllImport("kernel32.dll")]
+        private static extern bool CloseHandle(IntPtr handle);
+
+        [StructLayout(LayoutKind.Sequential)]
+        struct JOBOBJECT_BASIC_LIMIT_INFORMATION
+        {
+            public long PerProcessUserTimeLimit;
+            public long PerJobUserTimeLimit;
+            public int LimitFlags;
+            public UIntPtr MinimumWorkingSetSize;
+            public UIntPtr MaximumWorkingSetSize;
+            public int ActiveProcessLimit;
+            public UIntPtr Affinity;
+            public int PriorityClass;
+            public int SchedulingClass;
+        }
+
+        [StructLayout(LayoutKind.Sequential)]
+        struct IO_COUNTERS
+        {
+            public ulong ReadOperationCount;
+            public ulong WriteOperationCount;
+            public ulong OtherOperationCount;
+            public ulong ReadTransferCount;
+            public ulong WriteTransferCount;
+            public ulong OtherTransferCount;
+        }
+
+        [StructLayout(LayoutKind.Sequential)]
+        struct JOBOBJECT_EXTENDED_LIMIT_INFORMATION
+        {
+            public JOBOBJECT_BASIC_LIMIT_INFORMATION BasicLimitInformation;
+            public IO_COUNTERS IoInfo;
+            public UIntPtr ProcessMemoryLimit;
+            public UIntPtr JobMemoryLimit;
+            public UIntPtr PeakProcessMemoryUsed;
+            public UIntPtr PeakJobMemoryUsed;
+        }
+
+        private const int JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE = 0x2000;
+        private const int JobObjectExtendedLimitInformation = 9;
 
         [STAThread]
         static void Main()
@@ -71,8 +127,14 @@ namespace FileTransferFast
                 return;
             }
 
+            // Kill any orphan node still occupying 8001/8443 from a previous crash
+            KillOrphanServersOnPorts();
+
             // Prepare MainWindow first so logs can stream into it
             activeWindow = new MainWindow();
+            activeWindow.FormClosing += (s, e) => Cleanup();
+            AppDomain.CurrentDomain.ProcessExit += (s, e) => Cleanup();
+            Application.ApplicationExit += (s, e) => Cleanup();
 
             // Launch the Node.js server engine in background with live redirected streams
             try
@@ -85,9 +147,13 @@ namespace FileTransferFast
                 psi.UseShellExecute = false;
                 psi.RedirectStandardOutput = true;
                 psi.RedirectStandardError = true;
+                // Pass parent PID so server.js can watchdog and exit if launcher dies unexpectedly
+                try { psi.EnvironmentVariables["FTF_PARENT_PID"] = Process.GetCurrentProcess().Id.ToString(); } catch { }
 
                 serverProcess = new Process();
                 serverProcess.StartInfo = psi;
+                serverProcess.EnableRaisingEvents = true;
+                serverProcess.Exited += (s, e) => { try { AddLog("[ENGINE] Server process exited (code " + serverProcess.ExitCode + ")"); } catch { } };
 
                 serverProcess.OutputDataReceived += (s, e) =>
                 {
@@ -101,6 +167,21 @@ namespace FileTransferFast
                 serverProcess.Start();
                 serverProcess.BeginOutputReadLine();
                 serverProcess.BeginErrorReadLine();
+
+                // Assign to Job Object so child dies automatically if parent is killed via Task Manager
+                try
+                {
+                    jobHandle = CreateJobObject(IntPtr.Zero, null);
+                    if (jobHandle != IntPtr.Zero)
+                    {
+                        var info = new JOBOBJECT_EXTENDED_LIMIT_INFORMATION();
+                        info.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
+                        SetInformationJobObject(jobHandle, JobObjectExtendedLimitInformation, ref info, Marshal.SizeOf(info));
+                        AssignProcessToJobObject(jobHandle, serverProcess.Handle);
+                        AddLog("[ENGINE] Job object armed (kill-on-close)");
+                    }
+                }
+                catch (Exception ex) { try { AddLog("[ENGINE] Job object failed: " + ex.Message); } catch { } }
             }
             catch (Exception ex)
             {
@@ -138,11 +219,15 @@ namespace FileTransferFast
                 catch { }
             });
 
-            // Run GUI window
-            Application.Run(activeWindow);
-
-            // Clean up server on exit
-            Cleanup();
+            // Run GUI window - guaranteed cleanup via try/finally + FormClosing + ProcessExit
+            try
+            {
+                Application.Run(activeWindow);
+            }
+            finally
+            {
+                Cleanup();
+            }
         }
 
         public static void AddLog(string msg)
@@ -171,8 +256,16 @@ namespace FileTransferFast
             }
         }
 
-        private static void Cleanup()
+        public static void Cleanup()
         {
+            lock (cleanupLock)
+            {
+                if (cleanupDone) return;
+                cleanupDone = true;
+            }
+
+            try { AddLog("[ENGINE] Shutting down..."); } catch { }
+
             // 1. Immediately mark host offline in cloud lobby
             try
             {
@@ -191,15 +284,109 @@ namespace FileTransferFast
             }
             catch { }
 
-            // 2. Kill server process
+            // 2. Kill server process (with tree-kill fallback)
             try
             {
                 if (serverProcess != null && !serverProcess.HasExited)
                 {
-                    serverProcess.Kill();
+                    int pid = serverProcess.Id;
+                    try { serverProcess.Kill(); } catch { }
+
+                    // Give it 2s to exit gracefully, then force tree-kill
+                    try
+                    {
+                        if (!serverProcess.WaitForExit(2000))
+                        {
+                            KillProcessTree(pid);
+                        }
+                    }
+                    catch { KillProcessTree(pid); }
+
+                    try { serverProcess.Close(); } catch { }
                 }
             }
             catch { }
+
+            // 3. Fallback: ensure no node is still listening on 8001/8443 (covers orphan from crash)
+            try { KillOrphanServersOnPorts(); } catch { }
+
+            // 4. Close job handle (if kill-on-close was armed, this also kills any remaining child)
+            try
+            {
+                if (jobHandle != IntPtr.Zero)
+                {
+                    CloseHandle(jobHandle);
+                    jobHandle = IntPtr.Zero;
+                }
+            }
+            catch { }
+
+            try { File.AppendAllText(logFilePath, "[" + DateTime.Now.ToString("HH:mm:ss") + "] Engine shut down" + Environment.NewLine); } catch { }
+        }
+
+        private static void KillProcessTree(int pid)
+        {
+            try
+            {
+                var psi = new ProcessStartInfo("taskkill", "/PID " + pid + " /T /F");
+                psi.CreateNoWindow = true;
+                psi.UseShellExecute = false;
+                psi.RedirectStandardOutput = true;
+                psi.RedirectStandardError = true;
+                var p = Process.Start(psi);
+                if (p != null) p.WaitForExit(3000);
+            }
+            catch { }
+            // Last resort: direct Kill if still alive
+            try
+            {
+                var proc = Process.GetProcessById(pid);
+                if (!proc.HasExited) proc.Kill();
+            }
+            catch { }
+        }
+
+        private static void KillOrphanServersOnPorts()
+        {
+            int[] ports = new int[] { 8001, 8443 };
+            foreach (int port in ports)
+            {
+                try
+                {
+                    var psi = new ProcessStartInfo("cmd.exe", "/c netstat -ano | findstr :" + port + " ");
+                    psi.CreateNoWindow = true;
+                    psi.UseShellExecute = false;
+                    psi.RedirectStandardOutput = true;
+                    var p = Process.Start(psi);
+                    string output = p.StandardOutput.ReadToEnd();
+                    p.WaitForExit(2000);
+                    string[] lines = output.Split(new char[] { '\r', '\n' }, StringSplitOptions.RemoveEmptyEntries);
+                    foreach (string line in lines)
+                    {
+                        // Expected: TCP    0.0.0.0:8001    0.0.0.0:0    LISTENING    1234
+                        if (!line.Contains("LISTENING")) continue;
+                        string[] parts = line.Trim().Split(new char[] { ' ', '\t' }, StringSplitOptions.RemoveEmptyEntries);
+                        if (parts.Length == 0) continue;
+                        string pidStr = parts[parts.Length - 1];
+                        int pid;
+                        if (!int.TryParse(pidStr, out pid)) continue;
+                        if (pid == Process.GetCurrentProcess().Id) continue;
+                        // Only kill if it's node.exe (avoid killing unrelated)
+                        try
+                        {
+                            var proc = Process.GetProcessById(pid);
+                            string name = proc.ProcessName.ToLowerInvariant();
+                            if (name == "node" || name == "filetransferfast")
+                            {
+                                AddLog("[CLEANUP] Killing orphan " + name + " PID " + pid + " on port " + port);
+                                KillProcessTree(pid);
+                            }
+                        }
+                        catch { }
+                    }
+                }
+                catch { }
+            }
         }
 
         private static string FindNodeExecutable(string appDir)

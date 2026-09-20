@@ -43,6 +43,24 @@ function cleanIP(ip) {
 }
 
 const HOST_IP = getLocalIP();
+
+// --- Parent watchdog: ensure we close when FileTransferFast.exe closes ---
+// Launcher.cs sets FTF_PARENT_PID env var and also arms a Job Object.
+// This is a second layer: if parent PID dies, we exit and free ports 8001/8443.
+const PARENT_PID = parseInt(process.env.FTF_PARENT_PID || '0', 10);
+if (PARENT_PID) {
+  console.log(`[WATCHDOG] Parent PID ${PARENT_PID} - will exit if parent dies`);
+  setInterval(() => {
+    try {
+      process.kill(PARENT_PID, 0);
+    } catch (e) {
+      console.log('[WATCHDOG] Parent died, shutting down...');
+      process.exit(0);
+    }
+  }, 2000);
+  try { process.on('disconnect', () => { console.log('[WATCHDOG] disconnect'); process.exit(0); }); } catch {}
+}
+
 let activePin = null;
 const LIVE_WRAPPER_URL = process.env.LIVE_WRAPPER_URL || 'https://live-site-pi.vercel.app';
 let saveDir = path.join(os.homedir(), 'File Transfer');
@@ -1889,5 +1907,10 @@ validateBrowserJS();
 
   process.on('SIGINT', async () => { await markOffline(); process.exit(0); });
   process.on('SIGTERM', async () => { await markOffline(); process.exit(0); });
+  // Windows-specific: SIGBREAK (Ctrl+Break) and SIGHUP - also ensure offline + exit
+  try { process.on('SIGBREAK', async () => { await markOffline(); process.exit(0); }); } catch {}
+  try { process.on('SIGHUP', async () => { await markOffline(); process.exit(0); }); } catch {}
+  // Graceful http/https close on exit
+  try { process.on('exit', () => { try { httpServer.close(); } catch {} }); } catch {}
 })();
 
